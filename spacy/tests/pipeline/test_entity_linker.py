@@ -1,18 +1,20 @@
 from typing import Callable, Iterable
+
 import pytest
 from numpy.testing import assert_equal
+
+from spacy import registry, util
 from spacy.attrs import ENT_KB_ID
-
-from spacy.kb import KnowledgeBase, get_candidates, Candidate
-from spacy.vocab import Vocab
-
-from spacy import util, registry
+from spacy.compat import pickle
+from spacy.kb import Candidate, KnowledgeBase, get_candidates
+from spacy.lang.en import English
 from spacy.ml import load_kb
 from spacy.scorer import Scorer
-from spacy.training import Example
-from spacy.lang.en import English
 from spacy.tests.util import make_tempdir
 from spacy.tokens import Span
+from spacy.training import Example
+from spacy.util import ensure_path
+from spacy.vocab import Vocab
 
 
 @pytest.fixture
@@ -23,6 +25,198 @@ def nlp():
 def assert_almost_equal(a, b):
     delta = 0.0001
     assert a - delta <= b <= a + delta
+
+
+@pytest.mark.issue(4674)
+def test_issue4674():
+    """Test that setting entities with overlapping identifiers does not mess up IO"""
+    nlp = English()
+    kb = KnowledgeBase(nlp.vocab, entity_vector_length=3)
+    vector1 = [0.9, 1.1, 1.01]
+    vector2 = [1.8, 2.25, 2.01]
+    with pytest.warns(UserWarning):
+        kb.set_entities(
+            entity_list=["Q1", "Q1"],
+            freq_list=[32, 111],
+            vector_list=[vector1, vector2],
+        )
+    assert kb.get_size_entities() == 1
+    # dumping to file & loading back in
+    with make_tempdir() as d:
+        dir_path = ensure_path(d)
+        if not dir_path.exists():
+            dir_path.mkdir()
+        file_path = dir_path / "kb"
+        kb.to_disk(str(file_path))
+        kb2 = KnowledgeBase(nlp.vocab, entity_vector_length=3)
+        kb2.from_disk(str(file_path))
+    assert kb2.get_size_entities() == 1
+
+
+@pytest.mark.issue(6730)
+def test_issue6730(en_vocab):
+    """Ensure that the KB does not accept empty strings, but otherwise IO works fine."""
+    from spacy.kb import KnowledgeBase
+
+    kb = KnowledgeBase(en_vocab, entity_vector_length=3)
+    kb.add_entity(entity="1", freq=148, entity_vector=[1, 2, 3])
+
+    with pytest.raises(ValueError):
+        kb.add_alias(alias="", entities=["1"], probabilities=[0.4])
+    assert kb.contains_alias("") is False
+
+    kb.add_alias(alias="x", entities=["1"], probabilities=[0.2])
+    kb.add_alias(alias="y", entities=["1"], probabilities=[0.1])
+
+    with make_tempdir() as tmp_dir:
+        kb.to_disk(tmp_dir)
+        kb.from_disk(tmp_dir)
+    assert kb.get_size_aliases() == 2
+    assert set(kb.get_alias_strings()) == {"x", "y"}
+
+
+@pytest.mark.issue(7065)
+def test_issue7065():
+    text = "Kathleen Battle sang in Mahler 's Symphony No. 8 at the Cincinnati Symphony Orchestra 's May Festival."
+    nlp = English()
+    nlp.add_pipe("sentencizer")
+    ruler = nlp.add_pipe("entity_ruler")
+    patterns = [
+        {
+            "label": "THING",
+            "pattern": [
+                {"LOWER": "symphony"},
+                {"LOWER": "no"},
+                {"LOWER": "."},
+                {"LOWER": "8"},
+            ],
+        }
+    ]
+    ruler.add_patterns(patterns)
+
+    doc = nlp(text)
+    sentences = [s for s in doc.sents]
+    assert len(sentences) == 2
+    sent0 = sentences[0]
+    ent = doc.ents[0]
+    assert ent.start < sent0.end < ent.end
+    assert sentences.index(ent.sent) == 0
+
+
+@pytest.mark.issue(7065)
+def test_issue7065_b():
+    # Test that the NEL doesn't crash when an entity crosses a sentence boundary
+    nlp = English()
+    vector_length = 3
+    nlp.add_pipe("sentencizer")
+    text = "Mahler 's Symphony No. 8 was beautiful."
+    entities = [(0, 6, "PERSON"), (10, 24, "WORK")]
+    links = {
+        (0, 6): {"Q7304": 1.0, "Q270853": 0.0},
+        (10, 24): {"Q7304": 0.0, "Q270853": 1.0},
+    }
+    sent_starts = [1, -1, 0, 0, 0, 0, 0, 0, 0]
+    doc = nlp(text)
+    example = Example.from_dict(
+        doc, {"entities": entities, "links": links, "sent_starts": sent_starts}
+    )
+    train_examples = [example]
+
+    def create_kb(vocab):
+        # create artificial KB
+        mykb = KnowledgeBase(vocab, entity_vector_length=vector_length)
+        mykb.add_entity(entity="Q270853", freq=12, entity_vector=[9, 1, -7])
+        mykb.add_alias(
+            alias="No. 8",
+            entities=["Q270853"],
+            probabilities=[1.0],
+        )
+        mykb.add_entity(entity="Q7304", freq=12, entity_vector=[6, -4, 3])
+        mykb.add_alias(
+            alias="Mahler",
+            entities=["Q7304"],
+            probabilities=[1.0],
+        )
+        return mykb
+
+    # Create the Entity Linker component and add it to the pipeline
+    entity_linker = nlp.add_pipe("entity_linker", last=True)
+    entity_linker.set_kb(create_kb)
+    # train the NEL pipe
+    optimizer = nlp.initialize(get_examples=lambda: train_examples)
+    for i in range(2):
+        losses = {}
+        nlp.update(train_examples, sgd=optimizer, losses=losses)
+
+    # Add a custom rule-based component to mimick NER
+    patterns = [
+        {"label": "PERSON", "pattern": [{"LOWER": "mahler"}]},
+        {
+            "label": "WORK",
+            "pattern": [
+                {"LOWER": "symphony"},
+                {"LOWER": "no"},
+                {"LOWER": "."},
+                {"LOWER": "8"},
+            ],
+        },
+    ]
+    ruler = nlp.add_pipe("entity_ruler", before="entity_linker")
+    ruler.add_patterns(patterns)
+    # test the trained model - this should not throw E148
+    doc = nlp(text)
+    assert doc
+
+
+def test_partial_links():
+    # Test that having some entities on the doc without gold links, doesn't crash
+    TRAIN_DATA = [
+        (
+            "Russ Cochran his reprints include EC Comics.",
+            {
+                "links": {(0, 12): {"Q2146908": 1.0}},
+                "entities": [(0, 12, "PERSON")],
+                "sent_starts": [1, -1, 0, 0, 0, 0, 0, 0],
+            },
+        )
+    ]
+    nlp = English()
+    vector_length = 3
+    train_examples = []
+    for text, annotation in TRAIN_DATA:
+        doc = nlp(text)
+        train_examples.append(Example.from_dict(doc, annotation))
+
+    def create_kb(vocab):
+        # create artificial KB
+        mykb = KnowledgeBase(vocab, entity_vector_length=vector_length)
+        mykb.add_entity(entity="Q2146908", freq=12, entity_vector=[6, -4, 3])
+        mykb.add_alias("Russ Cochran", ["Q2146908"], [0.9])
+        return mykb
+
+    # Create and train the Entity Linker
+    entity_linker = nlp.add_pipe("entity_linker", last=True)
+    entity_linker.set_kb(create_kb)
+    optimizer = nlp.initialize(get_examples=lambda: train_examples)
+    for i in range(2):
+        losses = {}
+        nlp.update(train_examples, sgd=optimizer, losses=losses)
+
+    # adding additional components that are required for the entity_linker
+    nlp.add_pipe("sentencizer", first=True)
+    patterns = [
+        {"label": "PERSON", "pattern": [{"LOWER": "russ"}, {"LOWER": "cochran"}]},
+        {"label": "ORG", "pattern": [{"LOWER": "ec"}, {"LOWER": "comics"}]},
+    ]
+    ruler = nlp.add_pipe("entity_ruler", before="entity_linker")
+    ruler.add_patterns(patterns)
+
+    # this will run the pipeline on the examples and shouldn't crash
+    results = nlp.evaluate(train_examples)
+    assert "PERSON" in results["ents_per_type"]
+    assert "PERSON" in results["nel_f_per_type"]
+    assert "ORG" in results["ents_per_type"]
+    assert "ORG" not in results["nel_f_per_type"]
 
 
 def test_kb_valid_entities(nlp):
@@ -154,6 +348,40 @@ def test_kb_serialize(nlp):
             mykb.from_disk(d / "unknown" / "kb")
 
 
+@pytest.mark.issue(9137)
+def test_kb_serialize_2(nlp):
+    v = [5, 6, 7, 8]
+    kb1 = KnowledgeBase(vocab=nlp.vocab, entity_vector_length=4)
+    kb1.set_entities(["E1"], [1], [v])
+    assert kb1.get_vector("E1") == v
+    with make_tempdir() as d:
+        kb1.to_disk(d / "kb")
+        kb2 = KnowledgeBase(vocab=nlp.vocab, entity_vector_length=4)
+        kb2.from_disk(d / "kb")
+        assert kb2.get_vector("E1") == v
+
+
+def test_kb_set_entities(nlp):
+    """Test that set_entities entirely overwrites the previous set of entities"""
+    v = [5, 6, 7, 8]
+    v1 = [1, 1, 1, 0]
+    v2 = [2, 2, 2, 3]
+    kb1 = KnowledgeBase(vocab=nlp.vocab, entity_vector_length=4)
+    kb1.set_entities(["E0"], [1], [v])
+    assert kb1.get_entity_strings() == ["E0"]
+    kb1.set_entities(["E1", "E2"], [1, 9], [v1, v2])
+    assert set(kb1.get_entity_strings()) == {"E1", "E2"}
+    assert kb1.get_vector("E1") == v1
+    assert kb1.get_vector("E2") == v2
+    with make_tempdir() as d:
+        kb1.to_disk(d / "kb")
+        kb2 = KnowledgeBase(vocab=nlp.vocab, entity_vector_length=4)
+        kb2.from_disk(d / "kb")
+        assert set(kb2.get_entity_strings()) == {"E1", "E2"}
+        assert kb2.get_vector("E1") == v1
+        assert kb2.get_vector("E2") == v2
+
+
 def test_kb_serialize_vocab(nlp):
     """Test serialization of the KB and custom strings"""
     entity = "MyFunnyID"
@@ -230,7 +458,7 @@ def test_el_pipe_configuration(nlp):
     def get_lowercased_candidates(kb, span):
         return kb.get_alias_candidates(span.text.lower())
 
-    @registry.misc.register("spacy.LowercaseCandidateGenerator.v1")
+    @registry.misc("spacy.LowercaseCandidateGenerator.v1")
     def create_candidates() -> Callable[[KnowledgeBase, "Span"], Iterable[Candidate]]:
         return get_lowercased_candidates
 
@@ -248,6 +476,16 @@ def test_el_pipe_configuration(nlp):
     assert doc[0].ent_kb_id_ == "Q2"
     assert doc[1].ent_kb_id_ == ""
     assert doc[2].ent_kb_id_ == "Q2"
+
+
+def test_nel_nsents(nlp):
+    """Test that n_sents can be set through the configuration"""
+    entity_linker = nlp.add_pipe("entity_linker", config={})
+    assert entity_linker.n_sents == 0
+    entity_linker = nlp.replace_pipe(
+        "entity_linker", "entity_linker", config={"n_sents": 2}
+    )
+    assert entity_linker.n_sents == 2
 
 
 def test_vocab_serialization(nlp):
@@ -282,6 +520,9 @@ def test_vocab_serialization(nlp):
         assert candidates[0].alias == adam_hash
         assert candidates[0].alias_ == "adam"
 
+        assert kb_new_vocab.get_vector("Q2") == [2]
+        assert_almost_equal(kb_new_vocab.get_prior_prob("Q2", "douglas"), 0.4)
+
 
 def test_append_alias(nlp):
     """Test that we can append additional alias-entity pairs"""
@@ -313,6 +554,7 @@ def test_append_alias(nlp):
     assert len(mykb.get_alias_candidates("douglas")) == 3
 
 
+@pytest.mark.filterwarnings("ignore:\\[W036")
 def test_append_invalid_alias(nlp):
     """Test that append an alias will throw an error if prior probs are exceeding 1"""
     mykb = KnowledgeBase(nlp.vocab, entity_vector_length=1)
@@ -331,6 +573,7 @@ def test_append_invalid_alias(nlp):
         mykb.append_alias(alias="douglas", entity="Q1", prior_prob=0.2)
 
 
+@pytest.mark.filterwarnings("ignore:\\[W036")
 def test_preserving_links_asdoc(nlp):
     """Test that Span.as_doc preserves the existing entity links"""
     vector_length = 1
@@ -536,6 +779,106 @@ def test_kb_serialization():
         entity_linker.set_kb(load_kb(kb_dir))
         assert "Q2146908" in nlp2.vocab.strings
         assert "RandomWord" in nlp2.vocab.strings
+
+
+@pytest.mark.xfail(reason="Needs fixing")
+def test_kb_pickle():
+    # Test that the KB can be pickled
+    nlp = English()
+    kb_1 = KnowledgeBase(nlp.vocab, entity_vector_length=3)
+    kb_1.add_entity(entity="Q2146908", freq=12, entity_vector=[6, -4, 3])
+    assert not kb_1.contains_alias("Russ Cochran")
+    kb_1.add_alias(alias="Russ Cochran", entities=["Q2146908"], probabilities=[0.8])
+    assert kb_1.contains_alias("Russ Cochran")
+    data = pickle.dumps(kb_1)
+    kb_2 = pickle.loads(data)
+    assert kb_2.contains_alias("Russ Cochran")
+
+
+@pytest.mark.xfail(reason="Needs fixing")
+def test_nel_pickle():
+    # Test that a pipeline with an EL component can be pickled
+    def create_kb(vocab):
+        kb = KnowledgeBase(vocab, entity_vector_length=3)
+        kb.add_entity(entity="Q2146908", freq=12, entity_vector=[6, -4, 3])
+        kb.add_alias(alias="Russ Cochran", entities=["Q2146908"], probabilities=[0.8])
+        return kb
+
+    nlp_1 = English()
+    nlp_1.add_pipe("ner")
+    entity_linker_1 = nlp_1.add_pipe("entity_linker", last=True)
+    entity_linker_1.set_kb(create_kb)
+    assert nlp_1.pipe_names == ["ner", "entity_linker"]
+    assert entity_linker_1.kb.contains_alias("Russ Cochran")
+
+    data = pickle.dumps(nlp_1)
+    nlp_2 = pickle.loads(data)
+    assert nlp_2.pipe_names == ["ner", "entity_linker"]
+    entity_linker_2 = nlp_2.get_pipe("entity_linker")
+    assert entity_linker_2.kb.contains_alias("Russ Cochran")
+
+
+def test_kb_to_bytes():
+    # Test that the KB's to_bytes method works correctly
+    nlp = English()
+    kb_1 = KnowledgeBase(nlp.vocab, entity_vector_length=3)
+    kb_1.add_entity(entity="Q2146908", freq=12, entity_vector=[6, -4, 3])
+    kb_1.add_entity(entity="Q66", freq=9, entity_vector=[1, 2, 3])
+    kb_1.add_alias(alias="Russ Cochran", entities=["Q2146908"], probabilities=[0.8])
+    kb_1.add_alias(alias="Boeing", entities=["Q66"], probabilities=[0.5])
+    kb_1.add_alias(
+        alias="Randomness", entities=["Q66", "Q2146908"], probabilities=[0.1, 0.2]
+    )
+    assert kb_1.contains_alias("Russ Cochran")
+    kb_bytes = kb_1.to_bytes()
+    kb_2 = KnowledgeBase(nlp.vocab, entity_vector_length=3)
+    assert not kb_2.contains_alias("Russ Cochran")
+    kb_2 = kb_2.from_bytes(kb_bytes)
+    # check that both KBs are exactly the same
+    assert kb_1.get_size_entities() == kb_2.get_size_entities()
+    assert kb_1.entity_vector_length == kb_2.entity_vector_length
+    assert kb_1.get_entity_strings() == kb_2.get_entity_strings()
+    assert kb_1.get_vector("Q2146908") == kb_2.get_vector("Q2146908")
+    assert kb_1.get_vector("Q66") == kb_2.get_vector("Q66")
+    assert kb_2.contains_alias("Russ Cochran")
+    assert kb_1.get_size_aliases() == kb_2.get_size_aliases()
+    assert kb_1.get_alias_strings() == kb_2.get_alias_strings()
+    assert len(kb_1.get_alias_candidates("Russ Cochran")) == len(
+        kb_2.get_alias_candidates("Russ Cochran")
+    )
+    assert len(kb_1.get_alias_candidates("Randomness")) == len(
+        kb_2.get_alias_candidates("Randomness")
+    )
+
+
+def test_nel_to_bytes():
+    # Test that a pipeline with an EL component can be converted to bytes
+    def create_kb(vocab):
+        kb = KnowledgeBase(vocab, entity_vector_length=3)
+        kb.add_entity(entity="Q2146908", freq=12, entity_vector=[6, -4, 3])
+        kb.add_alias(alias="Russ Cochran", entities=["Q2146908"], probabilities=[0.8])
+        return kb
+
+    nlp_1 = English()
+    nlp_1.add_pipe("ner")
+    entity_linker_1 = nlp_1.add_pipe("entity_linker", last=True)
+    entity_linker_1.set_kb(create_kb)
+    assert entity_linker_1.kb.contains_alias("Russ Cochran")
+    assert nlp_1.pipe_names == ["ner", "entity_linker"]
+
+    nlp_bytes = nlp_1.to_bytes()
+    nlp_2 = English()
+    nlp_2.add_pipe("ner")
+    nlp_2.add_pipe("entity_linker", last=True)
+    assert nlp_2.pipe_names == ["ner", "entity_linker"]
+    assert not nlp_2.get_pipe("entity_linker").kb.contains_alias("Russ Cochran")
+    nlp_2 = nlp_2.from_bytes(nlp_bytes)
+    kb_2 = nlp_2.get_pipe("entity_linker").kb
+    assert kb_2.contains_alias("Russ Cochran")
+    assert kb_2.get_vector("Q2146908") == [6, -4, 3]
+    assert_almost_equal(
+        kb_2.get_prior_prob(entity="Q2146908", alias="Russ Cochran"), 0.8
+    )
 
 
 def test_scorer_links():

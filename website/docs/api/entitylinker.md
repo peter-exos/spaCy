@@ -16,6 +16,16 @@ plausible candidates from that `KnowledgeBase` given a certain textual mention,
 and a machine learning model to pick the right candidate, given the local
 context of the mention.
 
+## Assigned Attributes {#assigned-attributes}
+
+Predictions, in the form of knowledge base IDs, will be assigned to
+`Token.ent_kb_id_`.
+
+| Location           | Value                             |
+| ------------------ | --------------------------------- |
+| `Token.ent_kb_id`  | Knowledge base ID (hash). ~~int~~ |
+| `Token.ent_kb_id_` | Knowledge base ID. ~~str~~        |
+
 ## Config and implementation {#config}
 
 The default config is defined by the pipeline component factory and describes
@@ -31,6 +41,7 @@ architectures and their arguments and hyperparameters.
 > from spacy.pipeline.entity_linker import DEFAULT_NEL_MODEL
 > config = {
 >    "labels_discard": [],
+>    "n_sents": 0,
 >    "incl_prior": True,
 >    "incl_context": True,
 >    "model": DEFAULT_NEL_MODEL,
@@ -40,14 +51,17 @@ architectures and their arguments and hyperparameters.
 > nlp.add_pipe("entity_linker", config=config)
 > ```
 
-| Setting                | Description                                                                                                                                                                                                                                                              |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `labels_discard`       | NER labels that will automatically get a "NIL" prediction. Defaults to `[]`. ~~Iterable[str]~~                                                                                                                                                                           |
-| `incl_prior`           | Whether or not to include prior probabilities from the KB in the model. Defaults to `True`. ~~bool~~                                                                                                                                                                     |
-| `incl_context`         | Whether or not to include the local context in the model. Defaults to `True`. ~~bool~~                                                                                                                                                                                   |
-| `model`                | The [`Model`](https://thinc.ai/docs/api-model) powering the pipeline component. Defaults to [EntityLinker](/api/architectures#EntityLinker). ~~Model~~                                                                                                                   |
-| `entity_vector_length` | Size of encoding vectors in the KB. Defaults to `64`. ~~int~~                                                                                                                                                                                                            |
-| `get_candidates`       | Function that generates plausible candidates for a given `Span` object. Defaults to [CandidateGenerator](/api/architectures#CandidateGenerator), a function looking up exact, case-dependent aliases in the KB. ~~Callable[[KnowledgeBase, Span], Iterable[Candidate]]~~ |
+| Setting                                  | Description                                                                                                                                                                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `labels_discard`                         | NER labels that will automatically get a "NIL" prediction. Defaults to `[]`. ~~Iterable[str]~~                                                                                                                                                                           |
+| `n_sents`                                | The number of neighbouring sentences to take into account. Defaults to 0. ~~int~~                                                                                                                                                                                        |
+| `incl_prior`                             | Whether or not to include prior probabilities from the KB in the model. Defaults to `True`. ~~bool~~                                                                                                                                                                     |
+| `incl_context`                           | Whether or not to include the local context in the model. Defaults to `True`. ~~bool~~                                                                                                                                                                                   |
+| `model`                                  | The [`Model`](https://thinc.ai/docs/api-model) powering the pipeline component. Defaults to [EntityLinker](/api/architectures#EntityLinker). ~~Model~~                                                                                                                   |
+| `entity_vector_length`                   | Size of encoding vectors in the KB. Defaults to `64`. ~~int~~                                                                                                                                                                                                            |
+| `get_candidates`                         | Function that generates plausible candidates for a given `Span` object. Defaults to [CandidateGenerator](/api/architectures#CandidateGenerator), a function looking up exact, case-dependent aliases in the KB. ~~Callable[[KnowledgeBase, Span], Iterable[Candidate]]~~ |
+| `overwrite` <Tag variant="new">3.2</Tag> | Whether existing annotation is overwritten. Defaults to `True`. ~~bool~~                                                                                                                                                                                                 |
+| `scorer` <Tag variant="new">3.2</Tag>    | The scoring method. Defaults to [`Scorer.score_links`](/api/scorer#score_links). ~~Optional[Callable]~~                                                                                                                                                                  |
 
 ```python
 %%GITHUB_SPACY/spacy/pipeline/entity_linker.py
@@ -80,17 +94,20 @@ custom knowledge base, you should either call
 [`set_kb`](/api/entitylinker#set_kb) or provide a `kb_loader` in the
 [`initialize`](/api/entitylinker#initialize) call.
 
-| Name                   | Description                                                                                                                      |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `vocab`                | The shared vocabulary. ~~Vocab~~                                                                                                 |
-| `model`                | The [`Model`](https://thinc.ai/docs/api-model) powering the pipeline component. ~~Model~~                                        |
-| `name`                 | String name of the component instance. Used to add entries to the `losses` during training. ~~str~~                              |
-| _keyword-only_         |                                                                                                                                  |
-| `entity_vector_length` | Size of encoding vectors in the KB. ~~int~~                                                                                      |
-| `get_candidates`       | Function that generates plausible candidates for a given `Span` object. ~~Callable[[KnowledgeBase, Span], Iterable[Candidate]]~~ |
-| `labels_discard`       | NER labels that will automatically get a `"NIL"` prediction. ~~Iterable[str]~~                                                   |
-| `incl_prior`           | Whether or not to include prior probabilities from the KB in the model. ~~bool~~                                                 |
-| `incl_context`         | Whether or not to include the local context in the model. ~~bool~~                                                               |
+| Name                                     | Description                                                                                                                      |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `vocab`                                  | The shared vocabulary. ~~Vocab~~                                                                                                 |
+| `model`                                  | The [`Model`](https://thinc.ai/docs/api-model) powering the pipeline component. ~~Model~~                                        |
+| `name`                                   | String name of the component instance. Used to add entries to the `losses` during training. ~~str~~                              |
+| _keyword-only_                           |                                                                                                                                  |
+| `entity_vector_length`                   | Size of encoding vectors in the KB. ~~int~~                                                                                      |
+| `get_candidates`                         | Function that generates plausible candidates for a given `Span` object. ~~Callable[[KnowledgeBase, Span], Iterable[Candidate]]~~ |
+| `labels_discard`                         | NER labels that will automatically get a `"NIL"` prediction. ~~Iterable[str]~~                                                   |
+| `n_sents`                                | The number of neighbouring sentences to take into account. ~~int~~                                                               |
+| `incl_prior`                             | Whether or not to include prior probabilities from the KB in the model. ~~bool~~                                                 |
+| `incl_context`                           | Whether or not to include the local context in the model. ~~bool~~                                                               |
+| `overwrite` <Tag variant="new">3.2</Tag> | Whether existing annotation is overwritten. Defaults to `True`. ~~bool~~                                                         |
+| `scorer` <Tag variant="new">3.2</Tag>    | The scoring method. Defaults to [`Scorer.score_links`](/api/scorer#score_links). ~~Optional[Callable]~~                          |
 
 ## EntityLinker.\_\_call\_\_ {#call tag="method"}
 
@@ -139,7 +156,7 @@ applied to the `Doc` in order. Both [`__call__`](/api/entitylinker#call) and
 | `batch_size`   | The number of documents to buffer. Defaults to `128`. ~~int~~ |
 | **YIELDS**     | The processed documents in order. ~~Doc~~                     |
 
-## EntityLinker.set_kb {#initialize tag="method" new="3"}
+## EntityLinker.set_kb {#set_kb tag="method" new="3"}
 
 The `kb_loader` should be a function that takes a `Vocab` instance and creates
 the `KnowledgeBase`, ensuring that the strings of the knowledge base are synced
@@ -154,7 +171,7 @@ with the current vocab.
 >     kb.add_alias(...)
 >     return kb
 > entity_linker = nlp.add_pipe("entity_linker")
-> entity_linker.set_kb(lambda: [], nlp=nlp, kb_loader=create_kb)
+> entity_linker.set_kb(create_kb)
 > ```
 
 | Name        | Description                                                                                                      |
@@ -210,10 +227,10 @@ if there is no prediction.
 > kb_ids = entity_linker.predict([doc1, doc2])
 > ```
 
-| Name        | Description                                 |
-| ----------- | ------------------------------------------- |
-| `docs`      | The documents to predict. ~~Iterable[Doc]~~ |
-| **RETURNS** | `List[str]`                                 | The predicted KB identifiers for the entities in the `docs`. ~~List[str]~~ |
+| Name        | Description                                                                |
+| ----------- | -------------------------------------------------------------------------- |
+| `docs`      | The documents to predict. ~~Iterable[Doc]~~                                |
+| **RETURNS** | The predicted KB identifiers for the entities in the `docs`. ~~List[str]~~ |
 
 ## EntityLinker.set_annotations {#set_annotations tag="method"}
 
@@ -247,29 +264,14 @@ pipe's entity linking model and context encoder. Delegates to
 > losses = entity_linker.update(examples, sgd=optimizer)
 > ```
 
-| Name              | Description                                                                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `examples`        | A batch of [`Example`](/api/example) objects to learn from. ~~Iterable[Example]~~                                                  |
-| _keyword-only_    |                                                                                                                                    |
-| `drop`            | The dropout rate. ~~float~~                                                                                                        |
-| `sgd`             | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~                      |
-| `losses`          | Optional record of the loss during training. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~           |
-| **RETURNS**       | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                              |
-
-## EntityLinker.score {#score tag="method" new="3"}
-
-Score a batch of examples.
-
-> #### Example
->
-> ```python
-> scores = entity_linker.score(examples)
-> ```
-
-| Name        | Description                                                                                    |
-| ----------- | ---------------------------------------------------------------------------------------------- |
-| `examples`  | The examples to score. ~~Iterable[Example]~~                                                   |
-| **RETURNS** | The scores, produced by [`Scorer.score_links`](/api/scorer#score_links) . ~~Dict[str, float]~~ |
+| Name           | Description                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `examples`     | A batch of [`Example`](/api/example) objects to learn from. ~~Iterable[Example]~~                                        |
+| _keyword-only_ |                                                                                                                          |
+| `drop`         | The dropout rate. ~~float~~                                                                                              |
+| `sgd`          | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~            |
+| `losses`       | Optional record of the loss during training. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~ |
+| **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                    |
 
 ## EntityLinker.create_optimizer {#create_optimizer tag="method"}
 
@@ -337,6 +339,42 @@ Load the pipe from disk. Modifies the object in place and returns it.
 | _keyword-only_ |                                                                                                 |
 | `exclude`      | String names of [serialization fields](#serialization-fields) to exclude. ~~Iterable[str]~~     |
 | **RETURNS**    | The modified `EntityLinker` object. ~~EntityLinker~~                                            |
+
+## EntityLinker.to_bytes {#to_bytes tag="method"}
+
+> #### Example
+>
+> ```python
+> entity_linker = nlp.add_pipe("entity_linker")
+> entity_linker_bytes = entity_linker.to_bytes()
+> ```
+
+Serialize the pipe to a bytestring, including the `KnowledgeBase`.
+
+| Name           | Description                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------- |
+| _keyword-only_ |                                                                                             |
+| `exclude`      | String names of [serialization fields](#serialization-fields) to exclude. ~~Iterable[str]~~ |
+| **RETURNS**    | The serialized form of the `EntityLinker` object. ~~bytes~~                                 |
+
+## EntityLinker.from_bytes {#from_bytes tag="method"}
+
+Load the pipe from a bytestring. Modifies the object in place and returns it.
+
+> #### Example
+>
+> ```python
+> entity_linker_bytes = entity_linker.to_bytes()
+> entity_linker = nlp.add_pipe("entity_linker")
+> entity_linker.from_bytes(entity_linker_bytes)
+> ```
+
+| Name           | Description                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------- |
+| `bytes_data`   | The data to load from. ~~bytes~~                                                            |
+| _keyword-only_ |                                                                                             |
+| `exclude`      | String names of [serialization fields](#serialization-fields) to exclude. ~~Iterable[str]~~ |
+| **RETURNS**    | The `EntityLinker` object. ~~EntityLinker~~                                                 |
 
 ## Serialization fields {#serialization-fields}
 

@@ -1,10 +1,11 @@
 from typing import Dict, List, Union, Optional, Any, Callable, Type, Tuple
 from typing import Iterable, TypeVar, TYPE_CHECKING
+from .compat import Literal
 from enum import Enum
 from pydantic import BaseModel, Field, ValidationError, validator, create_model
 from pydantic import StrictStr, StrictInt, StrictFloat, StrictBool
 from pydantic.main import ModelMetaclass
-from thinc.api import Optimizer, ConfigValidationError
+from thinc.api import Optimizer, ConfigValidationError, Model
 from thinc.config import Promise
 from collections import defaultdict
 import inspect
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     # This lets us add type hints for mypy etc. without causing circular imports
     from .language import Language  # noqa: F401
     from .training import Example  # noqa: F401
+    from .vocab import Vocab  # noqa: F401
 
 
 # fmt: off
@@ -43,7 +45,7 @@ def validate(schema: Type[BaseModel], obj: Dict[str, Any]) -> List[str]:
         for error in errors:
             err_loc = " -> ".join([str(p) for p in error.get("loc", [])])
             data[err_loc].append(error.get("msg"))
-        return [f"[{loc}] {', '.join(msg)}" for loc, msg in data.items()]
+        return [f"[{loc}] {', '.join(msg)}" for loc, msg in data.items()]  # type: ignore[arg-type]
 
 
 # Initialization
@@ -81,7 +83,7 @@ def get_arg_model(
     except ValueError:
         # Typically happens if the method is part of a Cython module without
         # binding=True. Here we just use an empty model that allows everything.
-        return create_model(name, __config__=ArgSchemaConfigExtra)
+        return create_model(name, __config__=ArgSchemaConfigExtra)  # type: ignore[arg-type, return-value]
     has_variable = False
     for param in sig.parameters.values():
         if param.name in exclude:
@@ -101,8 +103,8 @@ def get_arg_model(
         default = param.default if param.default != param.empty else default_empty
         sig_args[param.name] = (annotation, default)
     is_strict = strict and not has_variable
-    sig_args["__config__"] = ArgSchemaConfig if is_strict else ArgSchemaConfigExtra
-    return create_model(name, **sig_args)
+    sig_args["__config__"] = ArgSchemaConfig if is_strict else ArgSchemaConfigExtra  # type: ignore[assignment]
+    return create_model(name, **sig_args)  # type: ignore[arg-type, return-value]
 
 
 def validate_init_settings(
@@ -158,6 +160,7 @@ class TokenPatternString(BaseModel):
     NOT_IN: Optional[List[StrictStr]] = Field(None, alias="not_in")
     IS_SUBSET: Optional[List[StrictStr]] = Field(None, alias="is_subset")
     IS_SUPERSET: Optional[List[StrictStr]] = Field(None, alias="is_superset")
+    INTERSECTS: Optional[List[StrictStr]] = Field(None, alias="intersects")
 
     class Config:
         extra = "forbid"
@@ -174,8 +177,9 @@ class TokenPatternNumber(BaseModel):
     REGEX: Optional[StrictStr] = Field(None, alias="regex")
     IN: Optional[List[StrictInt]] = Field(None, alias="in")
     NOT_IN: Optional[List[StrictInt]] = Field(None, alias="not_in")
-    ISSUBSET: Optional[List[StrictInt]] = Field(None, alias="issubset")
-    ISSUPERSET: Optional[List[StrictInt]] = Field(None, alias="issuperset")
+    IS_SUBSET: Optional[List[StrictInt]] = Field(None, alias="is_subset")
+    IS_SUPERSET: Optional[List[StrictInt]] = Field(None, alias="is_superset")
+    INTERSECTS: Optional[List[StrictInt]] = Field(None, alias="intersects")
     EQ: Union[StrictInt, StrictFloat] = Field(None, alias="==")
     NEQ: Union[StrictInt, StrictFloat] = Field(None, alias="!=")
     GEQ: Union[StrictInt, StrictFloat] = Field(None, alias=">=")
@@ -195,10 +199,10 @@ class TokenPatternNumber(BaseModel):
 
 
 class TokenPatternOperator(str, Enum):
-    plus: StrictStr = "+"
-    start: StrictStr = "*"
-    question: StrictStr = "?"
-    exclamation: StrictStr = "!"
+    plus: StrictStr = StrictStr("+")
+    start: StrictStr = StrictStr("*")
+    question: StrictStr = StrictStr("?")
+    exclamation: StrictStr = StrictStr("!")
 
 
 StringValue = Union[TokenPatternString, StrictStr]
@@ -206,6 +210,7 @@ NumberValue = Union[TokenPatternNumber, StrictInt, StrictFloat]
 UnderscoreValue = Union[
     TokenPatternString, TokenPatternNumber, str, int, float, list, bool
 ]
+IobValue = Literal["", "I", "O", "B", 0, 1, 2, 3]
 
 
 class TokenPattern(BaseModel):
@@ -219,6 +224,9 @@ class TokenPattern(BaseModel):
     lemma: Optional[StringValue] = None
     shape: Optional[StringValue] = None
     ent_type: Optional[StringValue] = None
+    ent_iob: Optional[IobValue] = None
+    ent_id: Optional[StringValue] = None
+    ent_kb_id: Optional[StringValue] = None
     norm: Optional[StringValue] = None
     length: Optional[NumberValue] = None
     spacy: Optional[StrictBool] = None
@@ -313,6 +321,7 @@ class ConfigSchemaTraining(BaseModel):
     optimizer: Optimizer = Field(..., title="The optimizer to use")
     logger: Logger = Field(..., title="The logger to track training progress")
     frozen_components: List[str] = Field(..., title="Pipeline components that shouldn't be updated during training")
+    annotating_components: List[str] = Field(..., title="Pipeline components that should set annotations during training")
     before_to_disk: Optional[Callable[["Language"], "Language"]] = Field(..., title="Optional callback to modify nlp object after training, before it's saved to disk")
     # fmt: on
 
@@ -347,13 +356,14 @@ class ConfigSchemaPretrain(BaseModel):
     # fmt: off
     max_epochs: StrictInt = Field(..., title="Maximum number of epochs to train for")
     dropout: StrictFloat = Field(..., title="Dropout rate")
-    n_save_every: Optional[StrictInt] = Field(..., title="Saving frequency")
+    n_save_every: Optional[StrictInt] = Field(..., title="Saving additional temporary model after n batches within an epoch")
+    n_save_epoch: Optional[StrictInt] = Field(..., title="Saving model after every n epoch")
     optimizer: Optimizer = Field(..., title="The optimizer to use")
     corpus: StrictStr = Field(..., title="Path in the config to the training data")
     batcher: Batcher = Field(..., title="Batcher for the training data")
     component: str = Field(..., title="Component to find the layer to pretrain")
     layer: str = Field(..., title="Layer to pretrain. Whole model if empty.")
-    objective: Callable[["Vocab", "Model"], "Model"] = Field(..., title="A function that creates the pretraining objective.")
+    objective: Callable[["Vocab", Model], Model] = Field(..., title="A function that creates the pretraining objective.")
     # fmt: on
 
     class Config:
@@ -381,7 +391,7 @@ class ConfigSchemaInit(BaseModel):
 class ConfigSchema(BaseModel):
     training: ConfigSchemaTraining
     nlp: ConfigSchemaNlp
-    pretraining: Union[ConfigSchemaPretrain, ConfigSchemaPretrainEmpty] = {}
+    pretraining: Union[ConfigSchemaPretrain, ConfigSchemaPretrainEmpty] = {}  # type: ignore[assignment]
     components: Dict[str, Dict[str, Any]]
     corpora: Dict[str, Reader]
     initialize: ConfigSchemaInit
@@ -446,6 +456,7 @@ class ProjectConfigCommand(BaseModel):
 class ProjectConfigSchema(BaseModel):
     # fmt: off
     vars: Dict[StrictStr, Any] = Field({}, title="Optional variables to substitute in commands")
+    env: Dict[StrictStr, Any] = Field({}, title="Optional variable names to substitute in commands, mapped to environment variable names")
     assets: List[Union[ProjectConfigAssetURL, ProjectConfigAssetGit]] = Field([], title="Data assets")
     workflows: Dict[StrictStr, List[StrictStr]] = Field({}, title="Named workflows, mapped to list of project commands to run in order")
     commands: List[ProjectConfigCommand] = Field([], title="Project command shortucts")

@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Union, Optional
+from typing import Any, List, Union, Optional, Dict
 from pathlib import Path
 import srsly
 from preshed.bloom import BloomFilter
@@ -12,18 +12,16 @@ from .strings import get_string_id
 UNSET = object()
 
 
-def load_lookups(
-    lang: str, tables: List[str], strict: bool = True
-) -> Optional[Dict[str, Any]]:
+def load_lookups(lang: str, tables: List[str], strict: bool = True) -> "Lookups":
     """Load the data from the spacy-lookups-data package for a given language,
-    if available. Returns an empty dict if there's no data or if the package
+    if available. Returns an empty `Lookups` container if there's no data or if the package
     is not installed.
 
     lang (str): The language code (corresponds to entry point exposed by
         the spacy-lookups-data package).
     tables (List[str]): Name of tables to load, e.g. ["lemma_lookup", "lemma_exc"]
     strict (bool): Whether to raise an error if a table doesn't exist.
-    RETURNS (Dict[str, Any]): The lookups, keyed by table name.
+    RETURNS (Lookups): The lookups container containing the loaded tables.
     """
     # TODO: import spacy_lookups_data instead of going via entry points here?
     lookups = Lookups()
@@ -36,9 +34,9 @@ def load_lookups(
         if table not in data:
             if strict:
                 raise ValueError(Errors.E955.format(table=table, lang=lang))
-            language_data = {}
+            language_data = {}  # type: ignore[var-annotated]
         else:
-            language_data = load_language_data(data[table])
+            language_data = load_language_data(data[table])  # type: ignore[assignment]
         lookups.add_table(table, language_data)
     return lookups
 
@@ -118,7 +116,7 @@ class Table(OrderedDict):
         key = get_string_id(key)
         return OrderedDict.get(self, key, default)
 
-    def __contains__(self, key: Union[str, int]) -> bool:
+    def __contains__(self, key: Union[str, int]) -> bool:  # type: ignore[override]
         """Check whether a key is in the table. String keys will be hashed.
 
         key (str / int): The key to check.
@@ -174,7 +172,7 @@ class Lookups:
 
         DOCS: https://spacy.io/api/lookups#init
         """
-        self._tables = {}
+        self._tables: Dict[str, Table] = {}
 
     def __contains__(self, name: str) -> bool:
         """Check if the lookups contain a table of a given name. Delegates to

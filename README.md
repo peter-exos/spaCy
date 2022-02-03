@@ -16,7 +16,7 @@ production-ready [**training system**](https://spacy.io/usage/training) and easy
 model packaging, deployment and workflow management. spaCy is commercial
 open-source software, released under the MIT license.
 
-💫 **Version 3.0 out now!**
+💫 **Version 3.2 out now!**
 [Check out the release notes here.](https://github.com/explosion/spaCy/releases)
 
 [![Azure Pipelines](https://img.shields.io/azure-devops/build/explosion-ai/public/8/master.svg?logo=azure-pipelines&style=flat-square&label=build)](https://dev.azure.com/explosion-ai/public/_build?definitionId=8)
@@ -26,8 +26,8 @@ open-source software, released under the MIT license.
 [![Python wheels](https://img.shields.io/badge/wheels-%E2%9C%93-4c1.svg?longCache=true&style=flat-square&logo=python&logoColor=white)](https://github.com/explosion/wheelwright/releases)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg?style=flat-square)](https://github.com/ambv/black)
 <br />
-[![PyPi downloads](https://img.shields.io/pypi/dm/spacy?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/spacy/)
-[![Conda downloads](https://img.shields.io/conda/dn/conda-forge/spacy?style=flat-square&logo=conda-forge&logoColor=white)](https://anaconda.org/conda-forge/spacy)
+[![PyPi downloads](https://static.pepy.tech/personalized-badge/spacy?period=total&units=international_system&left_color=grey&right_color=orange&left_text=pip%20downloads)](https://pypi.org/project/spacy/)
+[![Conda downloads](https://img.shields.io/conda/dn/conda-forge/spacy?label=conda%20downloads)](https://anaconda.org/conda-forge/spacy)
 [![spaCy on Twitter](https://img.shields.io/twitter/follow/spacy_io.svg?style=social&label=Follow)](https://twitter.com/spacy_io)
 
 ## 📖 Documentation
@@ -61,11 +61,11 @@ open-source software, released under the MIT license.
 ## 💬 Where to ask questions
 
 The spaCy project is maintained by **[@honnibal](https://github.com/honnibal)**,
-**[@ines](https://github.com/ines)**, **[@svlandeg](https://github.com/svlandeg)** and
-**[@adrianeboyd](https://github.com/adrianeboyd)**. Please understand that we won't
-be able to provide individual support via email. We also believe that help is
-much more valuable if it's shared publicly, so that more people can benefit from
-it.
+**[@ines](https://github.com/ines)**, **[@svlandeg](https://github.com/svlandeg)**,
+**[@adrianeboyd](https://github.com/adrianeboyd)** and **[@polm](https://github.com/polm)**.
+Please understand that we won't be able to provide individual support via email.
+We also believe that help is much more valuable if it's shared publicly, so that
+more people can benefit from it.
 
 | Type                            | Platforms                               |
 | ------------------------------- | --------------------------------------- |
@@ -253,20 +253,14 @@ source .env/bin/activate
 # make sure you are using the latest pip
 python -m pip install -U pip setuptools wheel
 
-pip install .
+pip install -r requirements.txt
+pip install --no-build-isolation --editable .
 ```
 
 To install with extras:
 
 ```bash
-pip install .[lookups,cuda102]
-```
-
-To install all dependencies required for development, use the [`requirements.txt`](requirements.txt). Compared to regular install via pip, it
-additionally installs developer dependencies such as Cython.
-
-```bash
-pip install -r requirements.txt
+pip install --no-build-isolation --editable .[lookups,cuda102]
 ```
 
 ## 🚦 Run tests

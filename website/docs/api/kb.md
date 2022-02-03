@@ -152,7 +152,7 @@ Get a list of all aliases in the knowledge base.
 | ----------- | -------------------------------------------------------- |
 | **RETURNS** | The list of aliases in the knowledge base. ~~List[str]~~ |
 
-## KnowledgeBase.get_candidates {#get_candidates tag="method"}
+## KnowledgeBase.get_alias_candidates {#get_alias_candidates tag="method"}
 
 Given a certain textual mention as input, retrieve a list of candidate entities
 of type [`Candidate`](/api/kb/#candidate).
@@ -160,13 +160,13 @@ of type [`Candidate`](/api/kb/#candidate).
 > #### Example
 >
 > ```python
-> candidates = kb.get_candidates("Douglas")
+> candidates = kb.get_alias_candidates("Douglas")
 > ```
 
-| Name        | Description                           |
-| ----------- | ------------------------------------- |
-| `alias`     | The textual mention or alias. ~~str~~ |
-| **RETURNS** | iterable                              | The list of relevant `Candidate` objects. ~~List[Candidate]~~ |
+| Name        | Description                                                   |
+| ----------- | ------------------------------------------------------------- |
+| `alias`     | The textual mention or alias. ~~str~~                         |
+| **RETURNS** | The list of relevant `Candidate` objects. ~~List[Candidate]~~ |
 
 ## KnowledgeBase.get_vector {#get_vector tag="method"}
 
@@ -245,8 +245,8 @@ certain prior probability.
 ### Candidate.\_\_init\_\_ {#candidate-init tag="method"}
 
 Construct a `Candidate` object. Usually this constructor is not called directly,
-but instead these objects are returned by the
-[`get_candidates`](/api/kb#get_candidates) method of a `KnowledgeBase`.
+but instead these objects are returned by the `get_candidates` method of the
+[`entity_linker`](/api/entitylinker) pipe.
 
 > #### Example
 >

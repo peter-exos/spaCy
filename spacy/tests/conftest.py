@@ -3,7 +3,13 @@ from spacy.util import get_lang_class
 
 
 def pytest_addoption(parser):
-    parser.addoption("--slow", action="store_true", help="include slow tests")
+    try:
+        parser.addoption("--slow", action="store_true", help="include slow tests")
+        parser.addoption("--issue", action="store", help="test specific issues")
+    # Options are already added, e.g. if conftest is copied in a build pipeline
+    # and runs twice
+    except ValueError:
+        pass
 
 
 def pytest_runtest_setup(item):
@@ -16,9 +22,23 @@ def pytest_runtest_setup(item):
         # options weren't given.
         return item.config.getoption(f"--{opt}", False)
 
+    # Integration of boolean flags
     for opt in ["slow"]:
         if opt in item.keywords and not getopt(opt):
             pytest.skip(f"need --{opt} option to run")
+
+    # Special integration to mark tests with issue numbers
+    issues = getopt("issue")
+    if isinstance(issues, str):
+        if "issue" in item.keywords:
+            # Convert issues provided on the CLI to list of ints
+            issue_nos = [int(issue.strip()) for issue in issues.split(",")]
+            # Get all issues specified by decorators and check if they're provided
+            issue_refs = [mark.args[0] for mark in item.iter_markers(name="issue")]
+            if not any([ref in issue_nos for ref in issue_refs]):
+                pytest.skip(f"not referencing specified issues: {issue_nos}")
+        else:
+            pytest.skip("not referencing any issues")
 
 
 # Fixtures for language tokenizers (languages sorted alphabetically)
@@ -30,6 +50,11 @@ def tokenizer():
 
 
 @pytest.fixture(scope="session")
+def af_tokenizer():
+    return get_lang_class("af")().tokenizer
+
+
+@pytest.fixture(scope="session")
 def am_tokenizer():
     return get_lang_class("am")().tokenizer
 
@@ -37,6 +62,11 @@ def am_tokenizer():
 @pytest.fixture(scope="session")
 def ar_tokenizer():
     return get_lang_class("ar")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def bg_tokenizer():
+    return get_lang_class("bg")().tokenizer
 
 
 @pytest.fixture(scope="session")
@@ -96,6 +126,16 @@ def es_tokenizer():
 
 
 @pytest.fixture(scope="session")
+def es_vocab():
+    return get_lang_class("es")().vocab
+
+
+@pytest.fixture(scope="session")
+def et_tokenizer():
+    return get_lang_class("et")().tokenizer
+
+
+@pytest.fixture(scope="session")
 def eu_tokenizer():
     return get_lang_class("eu")().tokenizer
 
@@ -118,6 +158,11 @@ def fr_tokenizer():
 @pytest.fixture(scope="session")
 def ga_tokenizer():
     return get_lang_class("ga")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def grc_tokenizer():
+    return get_lang_class("grc")().tokenizer
 
 
 @pytest.fixture(scope="session")
@@ -151,6 +196,11 @@ def id_tokenizer():
 
 
 @pytest.fixture(scope="session")
+def is_tokenizer():
+    return get_lang_class("is")().tokenizer
+
+
+@pytest.fixture(scope="session")
 def it_tokenizer():
     return get_lang_class("it")().tokenizer
 
@@ -178,6 +228,11 @@ def lt_tokenizer():
 
 
 @pytest.fixture(scope="session")
+def lv_tokenizer():
+    return get_lang_class("lv")().tokenizer
+
+
+@pytest.fixture(scope="session")
 def mk_tokenizer():
     return get_lang_class("mk")().tokenizer
 
@@ -198,6 +253,11 @@ def ne_tokenizer():
 
 
 @pytest.fixture(scope="session")
+def nl_vocab():
+    return get_lang_class("nl")().vocab
+
+
+@pytest.fixture(scope="session")
 def nl_tokenizer():
     return get_lang_class("nl")().tokenizer
 
@@ -210,6 +270,11 @@ def pl_tokenizer():
 @pytest.fixture(scope="session")
 def pt_tokenizer():
     return get_lang_class("pt")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def pt_vocab():
+    return get_lang_class("pt")().vocab
 
 
 @pytest.fixture(scope="session")
@@ -235,8 +300,23 @@ def sa_tokenizer():
 
 
 @pytest.fixture(scope="session")
+def sk_tokenizer():
+    return get_lang_class("sk")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def sl_tokenizer():
+    return get_lang_class("sl")().tokenizer
+
+
+@pytest.fixture(scope="session")
 def sr_tokenizer():
     return get_lang_class("sr")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def sq_tokenizer():
+    return get_lang_class("sq")().tokenizer
 
 
 @pytest.fixture(scope="session")
@@ -253,6 +333,11 @@ def th_tokenizer():
 @pytest.fixture(scope="session")
 def ti_tokenizer():
     return get_lang_class("ti")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def tl_tokenizer():
+    return get_lang_class("tl")().tokenizer
 
 
 @pytest.fixture(scope="session")
@@ -276,9 +361,27 @@ def uk_tokenizer():
     return get_lang_class("uk")().tokenizer
 
 
+@pytest.fixture
+def uk_lemmatizer():
+    pytest.importorskip("pymorphy2")
+    pytest.importorskip("pymorphy2_dicts_uk")
+    return get_lang_class("uk")().add_pipe("lemmatizer")
+
+
 @pytest.fixture(scope="session")
 def ur_tokenizer():
     return get_lang_class("ur")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def vi_tokenizer():
+    pytest.importorskip("pyvi")
+    return get_lang_class("vi")().tokenizer
+
+
+@pytest.fixture(scope="session")
+def xx_tokenizer():
+    return get_lang_class("xx")().tokenizer
 
 
 @pytest.fixture(scope="session")

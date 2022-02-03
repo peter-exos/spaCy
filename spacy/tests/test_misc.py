@@ -7,17 +7,20 @@ from spacy import util
 from spacy import prefer_gpu, require_gpu, require_cpu
 from spacy.ml._precomputable_affine import PrecomputableAffine
 from spacy.ml._precomputable_affine import _backprop_precomputable_affine_padding
-from spacy.util import dot_to_object, SimpleFrozenList
+from spacy.util import dot_to_object, SimpleFrozenList, import_file
+from spacy.util import to_ternary_int
 from thinc.api import Config, Optimizer, ConfigValidationError
+from thinc.api import set_current_ops
 from spacy.training.batchers import minibatch_by_words
 from spacy.lang.en import English
 from spacy.lang.nl import Dutch
 from spacy.language import DEFAULT_CONFIG_PATH
-from spacy.schemas import ConfigSchemaTraining
+from spacy.schemas import ConfigSchemaTraining, TokenPattern, TokenPatternSchema
+from pydantic import ValidationError
 
 from thinc.api import get_current_ops, NumpyOps, CupyOps
 
-from .util import get_random_doc
+from .util import get_random_doc, make_tempdir
 
 
 @pytest.fixture
@@ -29,6 +32,32 @@ def is_admin():
         admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
 
     return admin
+
+
+@pytest.mark.issue(6207)
+def test_issue6207(en_tokenizer):
+    doc = en_tokenizer("zero one two three four five six")
+
+    # Make spans
+    s1 = doc[:4]
+    s2 = doc[3:6]  # overlaps with s1
+    s3 = doc[5:7]  # overlaps with s2, not s1
+
+    result = util.filter_spans((s1, s2, s3))
+    assert s1 in result
+    assert s2 not in result
+    assert s3 in result
+
+
+@pytest.mark.issue(6258)
+def test_issue6258():
+    """Test that the non-empty constraint pattern field is respected"""
+    # These one is valid
+    TokenPatternSchema(pattern=[TokenPattern()])
+    # But an empty pattern list should fail to validate
+    # based on the schema's constraint
+    with pytest.raises(ValidationError):
+        TokenPatternSchema(pattern=[])
 
 
 @pytest.mark.parametrize("text", ["hello/world", "hello world"])
@@ -81,6 +110,7 @@ def test_PrecomputableAffine(nO=4, nI=5, nF=3, nP=2):
 
 
 def test_prefer_gpu():
+    current_ops = get_current_ops()
     try:
         import cupy  # noqa: F401
 
@@ -88,9 +118,11 @@ def test_prefer_gpu():
         assert isinstance(get_current_ops(), CupyOps)
     except ImportError:
         assert not prefer_gpu()
+    set_current_ops(current_ops)
 
 
 def test_require_gpu():
+    current_ops = get_current_ops()
     try:
         import cupy  # noqa: F401
 
@@ -99,9 +131,11 @@ def test_require_gpu():
     except ImportError:
         with pytest.raises(ValueError):
             require_gpu()
+    set_current_ops(current_ops)
 
 
 def test_require_cpu():
+    current_ops = get_current_ops()
     require_cpu()
     assert isinstance(get_current_ops(), NumpyOps)
     try:
@@ -113,6 +147,7 @@ def test_require_cpu():
         pass
     require_cpu()
     assert isinstance(get_current_ops(), NumpyOps)
+    set_current_ops(current_ops)
 
 
 def test_ascii_filenames():
@@ -131,6 +166,12 @@ def test_load_model_blank_shortcut():
     nlp = util.load_model("blank:en")
     assert nlp.lang == "en"
     assert nlp.pipeline == []
+
+    # ImportError for loading an unsupported language
+    with pytest.raises(ImportError):
+        util.load_model("blank:zxx")
+
+    # ImportError for requesting an invalid language code that isn't registered
     with pytest.raises(ImportError):
         util.load_model("blank:fjsfijsdof")
 
@@ -267,7 +308,7 @@ def test_util_minibatch(doc_sizes, expected_batches):
     ],
 )
 def test_util_minibatch_oversize(doc_sizes, expected_batches):
-    """ Test that oversized documents are returned in their own batch"""
+    """Test that oversized documents are returned in their own batch"""
     docs = [get_random_doc(doc_size) for doc_size in doc_sizes]
     tol = 0.2
     batch_size = 1000
@@ -289,7 +330,7 @@ def test_util_dot_section():
     factory = "textcat"
 
     [components.textcat.model]
-    @architectures = "spacy.TextCatBOW.v1"
+    @architectures = "spacy.TextCatBOW.v2"
     exclusive_classes = true
     ngram_size = 1
     no_output_layer = false
@@ -347,3 +388,50 @@ def test_resolve_dot_names():
     errors = e.value.errors
     assert len(errors) == 1
     assert errors[0]["loc"] == ["training", "xyz"]
+
+
+def test_import_code():
+    code_str = """
+from spacy import Language
+
+class DummyComponent:
+    def __init__(self, vocab, name):
+        pass
+
+    def initialize(self, get_examples, *, nlp, dummy_param: int):
+        pass
+
+@Language.factory(
+    "dummy_component",
+)
+def make_dummy_component(
+    nlp: Language, name: str
+):
+    return DummyComponent(nlp.vocab, name)
+"""
+
+    with make_tempdir() as temp_dir:
+        code_path = os.path.join(temp_dir, "code.py")
+        with open(code_path, "w") as fileh:
+            fileh.write(code_str)
+
+        import_file("python_code", code_path)
+        config = {"initialize": {"components": {"dummy_component": {"dummy_param": 1}}}}
+        nlp = English.from_config(config)
+        nlp.add_pipe("dummy_component")
+        nlp.initialize()
+
+
+def test_to_ternary_int():
+    assert to_ternary_int(True) == 1
+    assert to_ternary_int(None) == 0
+    assert to_ternary_int(False) == -1
+    assert to_ternary_int(1) == 1
+    assert to_ternary_int(1.0) == 1
+    assert to_ternary_int(0) == 0
+    assert to_ternary_int(0.0) == 0
+    assert to_ternary_int(-1) == -1
+    assert to_ternary_int(5) == -1
+    assert to_ternary_int(-10) == -1
+    assert to_ternary_int("string") == -1
+    assert to_ternary_int([0, "string"]) == -1

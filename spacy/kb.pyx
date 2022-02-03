@@ -1,5 +1,5 @@
 # cython: infer_types=True, profile=True
-from typing import Iterator, Iterable
+from typing import Iterator, Iterable, Callable, Dict, Any
 
 import srsly
 from cymem.cymem cimport Pool
@@ -93,6 +93,17 @@ cdef class KnowledgeBase:
         self.vocab = vocab
         self._create_empty_vectors(dummy_hash=self.vocab.strings[""])
 
+    def initialize_entities(self, int64_t nr_entities):
+        self._entry_index = PreshMap(nr_entities + 1)
+        self._entries = entry_vec(nr_entities + 1)
+
+    def initialize_vectors(self, int64_t nr_entities):
+        self._vectors_table = float_matrix(nr_entities + 1)
+
+    def initialize_aliases(self, int64_t nr_aliases):
+        self._alias_index = PreshMap(nr_aliases + 1)
+        self._aliases_table = alias_vec(nr_aliases + 1)
+
     @property
     def entity_vector_length(self):
         """RETURNS (uint64): length of the entity vectors"""
@@ -113,7 +124,7 @@ cdef class KnowledgeBase:
     def get_alias_strings(self):
         return [self.vocab.strings[x] for x in self._alias_index]
 
-    def add_entity(self, unicode entity, float freq, vector[float] entity_vector):
+    def add_entity(self, str entity, float freq, vector[float] entity_vector):
         """
         Add an entity to the KB, optionally specifying its log probability based on corpus frequency
         Return the hash of the entity ID/name at the end.
@@ -144,8 +155,8 @@ cdef class KnowledgeBase:
             raise ValueError(Errors.E140)
 
         nr_entities = len(set(entity_list))
-        self._entry_index = PreshMap(nr_entities+1)
-        self._entries = entry_vec(nr_entities+1)
+        self.initialize_entities(nr_entities)
+        self.initialize_vectors(nr_entities)
 
         i = 0
         cdef KBEntryC entry
@@ -164,8 +175,8 @@ cdef class KnowledgeBase:
                 entry.entity_hash = entity_hash
                 entry.freq = freq_list[i]
 
-                vector_index = self.c_add_vector(entity_vector=vector_list[i])
-                entry.vector_index = vector_index
+                self._vectors_table[i] = entity_vector
+                entry.vector_index = i
 
                 entry.feats_row = -1   # Features table currently not implemented
 
@@ -174,15 +185,15 @@ cdef class KnowledgeBase:
 
             i += 1
 
-    def contains_entity(self, unicode entity):
+    def contains_entity(self, str entity):
         cdef hash_t entity_hash = self.vocab.strings.add(entity)
         return entity_hash in self._entry_index
 
-    def contains_alias(self, unicode alias):
+    def contains_alias(self, str alias):
         cdef hash_t alias_hash = self.vocab.strings.add(alias)
         return alias_hash in self._alias_index
 
-    def add_alias(self, unicode alias, entities, probabilities):
+    def add_alias(self, str alias, entities, probabilities):
         """
         For a given alias, add its potential entities and prior probabilies to the KB.
         Return the alias_hash at the end
@@ -228,7 +239,7 @@ cdef class KnowledgeBase:
             raise RuntimeError(Errors.E891.format(alias=alias))
         return alias_hash
 
-    def append_alias(self, unicode alias, unicode entity, float prior_prob, ignore_warnings=False):
+    def append_alias(self, str alias, str entity, float prior_prob, ignore_warnings=False):
         """
         For an alias already existing in the KB, extend its potential entities with one more.
         Throw a warning if either the alias or the entity is unknown,
@@ -275,7 +286,7 @@ cdef class KnowledgeBase:
             alias_entry.probs = probs
             self._aliases_table[alias_index] = alias_entry
 
-    def get_alias_candidates(self, unicode alias) -> Iterator[Candidate]:
+    def get_alias_candidates(self, str alias) -> Iterator[Candidate]:
         """
         Return candidate entities for an alias. Each candidate defines the entity, the original alias,
         and the prior probability of that alias resolving to that entity.
@@ -296,7 +307,7 @@ cdef class KnowledgeBase:
                 for (entry_index, prior_prob) in zip(alias_entry.entry_indices, alias_entry.probs)
                 if entry_index != 0]
 
-    def get_vector(self, unicode entity):
+    def get_vector(self, str entity):
         cdef hash_t entity_hash = self.vocab.strings[entity]
 
         # Return an empty list if this entity is unknown in this KB
@@ -306,7 +317,7 @@ cdef class KnowledgeBase:
 
         return self._vectors_table[self._entries[entry_index].vector_index]
 
-    def get_prior_prob(self, unicode entity, unicode alias):
+    def get_prior_prob(self, str entity, str alias):
         """ Return the prior probability of a given alias being linked to a given entity,
         or return 0.0 when this combination is not known in the knowledge base"""
         cdef hash_t alias_hash = self.vocab.strings[alias]
@@ -325,6 +336,103 @@ cdef class KnowledgeBase:
 
         return 0.0
 
+    def to_bytes(self, **kwargs):
+        """Serialize the current state to a binary string.
+        """
+        def serialize_header():
+            header = (self.get_size_entities(), self.get_size_aliases(), self.entity_vector_length)
+            return srsly.json_dumps(header)
+
+        def serialize_entries():
+            i = 1
+            tuples = []
+            for entry_hash, entry_index in sorted(self._entry_index.items(), key=lambda x: x[1]):
+                entry = self._entries[entry_index]
+                assert entry.entity_hash == entry_hash
+                assert entry_index == i
+                tuples.append((entry.entity_hash, entry.freq, entry.vector_index))
+                i = i + 1
+            return srsly.json_dumps(tuples)
+
+        def serialize_aliases():
+            i = 1
+            headers = []
+            indices_lists = []
+            probs_lists = []
+            for alias_hash, alias_index in sorted(self._alias_index.items(), key=lambda x: x[1]):
+                alias = self._aliases_table[alias_index]
+                assert alias_index == i
+                candidate_length = len(alias.entry_indices)
+                headers.append((alias_hash, candidate_length))
+                indices_lists.append(alias.entry_indices)
+                probs_lists.append(alias.probs)
+                i = i + 1
+            headers_dump = srsly.json_dumps(headers)
+            indices_dump = srsly.json_dumps(indices_lists)
+            probs_dump = srsly.json_dumps(probs_lists)
+            return srsly.json_dumps((headers_dump, indices_dump, probs_dump))
+
+        serializers = {
+            "header": serialize_header,
+            "entity_vectors": lambda: srsly.json_dumps(self._vectors_table),
+            "entries": serialize_entries,
+            "aliases": serialize_aliases,
+        }
+        return util.to_bytes(serializers, [])
+
+    def from_bytes(self, bytes_data, *, exclude=tuple()):
+        """Load state from a binary string.
+        """
+        def deserialize_header(b):
+            header = srsly.json_loads(b)
+            nr_entities = header[0]
+            nr_aliases = header[1]
+            entity_vector_length = header[2]
+            self.initialize_entities(nr_entities)
+            self.initialize_vectors(nr_entities)
+            self.initialize_aliases(nr_aliases)
+            self.entity_vector_length = entity_vector_length
+
+        def deserialize_vectors(b):
+            self._vectors_table = srsly.json_loads(b)
+
+        def deserialize_entries(b):
+            cdef KBEntryC entry
+            tuples = srsly.json_loads(b)
+            i = 1
+            for (entity_hash, freq, vector_index) in tuples:
+                entry.entity_hash = entity_hash
+                entry.freq = freq
+                entry.vector_index = vector_index
+                entry.feats_row = -1  # Features table currently not implemented
+                self._entries[i] = entry
+                self._entry_index[entity_hash] = i
+                i += 1
+
+        def deserialize_aliases(b):
+            cdef AliasC alias
+            i = 1
+            all_data = srsly.json_loads(b)
+            headers = srsly.json_loads(all_data[0])
+            indices = srsly.json_loads(all_data[1])
+            probs = srsly.json_loads(all_data[2])
+            for header, indices, probs in zip(headers, indices, probs):
+                alias_hash, candidate_length = header
+                alias.entry_indices = indices
+                alias.probs = probs
+                self._aliases_table[i] = alias
+                self._alias_index[alias_hash] = i
+                i += 1
+
+        setters = {
+            "header": deserialize_header,
+            "entity_vectors": deserialize_vectors,
+            "entries": deserialize_entries,
+            "aliases": deserialize_aliases,
+        }
+        util.from_bytes(bytes_data, setters, exclude)
+        return self
+
     def to_disk(self, path, exclude: Iterable[str] = SimpleFrozenList()):
         path = ensure_path(path)
         if not path.exists():
@@ -342,7 +450,7 @@ cdef class KnowledgeBase:
             raise ValueError(Errors.E929.format(loc=path))
         if not path.is_dir():
             raise ValueError(Errors.E928.format(loc=path))
-        deserialize = {}
+        deserialize: Dict[str, Callable[[Any], Any]] = {}
         deserialize["contents"] = lambda p: self.read_contents(p)
         deserialize["strings.json"] = lambda p: self.vocab.strings.from_disk(p)
         util.from_disk(path, deserialize, exclude)
@@ -404,10 +512,9 @@ cdef class KnowledgeBase:
         cdef int64_t entity_vector_length
         reader.read_header(&nr_entities, &entity_vector_length)
 
+        self.initialize_entities(nr_entities)
+        self.initialize_vectors(nr_entities)
         self.entity_vector_length = entity_vector_length
-        self._entry_index = PreshMap(nr_entities+1)
-        self._entries = entry_vec(nr_entities+1)
-        self._vectors_table = float_matrix(nr_entities+1)
 
         # STEP 1: load entity vectors
         cdef int i = 0
@@ -445,8 +552,7 @@ cdef class KnowledgeBase:
         # STEP 3: load aliases
         cdef int64_t nr_aliases
         reader.read_alias_length(&nr_aliases)
-        self._alias_index = PreshMap(nr_aliases+1)
-        self._aliases_table = alias_vec(nr_aliases+1)
+        self.initialize_aliases(nr_aliases)
 
         cdef int64_t nr_candidates
         cdef vector[int64_t] entry_indices
@@ -481,7 +587,7 @@ cdef class Writer:
     def __init__(self, path):
         assert isinstance(path, Path)
         content = bytes(path)
-        cdef bytes bytes_loc = content.encode('utf8') if type(content) == unicode else content
+        cdef bytes bytes_loc = content.encode('utf8') if type(content) == str else content
         self._fp = fopen(<char*>bytes_loc, 'wb')
         if not self._fp:
             raise IOError(Errors.E146.format(path=path))
@@ -523,7 +629,7 @@ cdef class Writer:
 cdef class Reader:
     def __init__(self, path):
         content = bytes(path)
-        cdef bytes bytes_loc = content.encode('utf8') if type(content) == unicode else content
+        cdef bytes bytes_loc = content.encode('utf8') if type(content) == str else content
         self._fp = fopen(<char*>bytes_loc, 'rb')
         if not self._fp:
             PyErr_SetFromErrno(IOError)

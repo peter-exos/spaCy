@@ -20,6 +20,7 @@ from .doc cimport set_children_from_heads
 
 from .. import parts_of_speech
 from ..errors import Errors, Warnings
+from ..attrs import IOB_STRINGS
 from .underscore import Underscore, get_ext_args
 
 
@@ -209,8 +210,10 @@ cdef class Token:
             return 0.0
         vector = self.vector
         xp = get_array_module(vector)
-        return (xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm))
-
+        result = xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm)
+        # ensure we get a scalar back (numpy does this automatically but cupy doesn't)
+        return result.item()
+    
     def has_morph(self):
         """Check whether the token has annotated morph information.
         Return False when the morph annotation is unset/missing.
@@ -267,7 +270,7 @@ cdef class Token:
         """RETURNS (str): The text content of the span (with trailing
             whitespace).
         """
-        cdef unicode orth = self.vocab.strings[self.c.lex.orth]
+        cdef str orth = self.vocab.strings[self.c.lex.orth]
         if self.c.spacy:
             return orth + " "
         else:
@@ -329,7 +332,7 @@ cdef class Token:
     @property
     def shape(self):
         """RETURNS (uint64): ID of the token's shape, a transform of the
-            tokens's string, to show orthographic features (e.g. "Xxxx", "dd").
+            token's string, to show orthographic features (e.g. "Xxxx", "dd").
         """
         return self.c.lex.shape
 
@@ -598,7 +601,7 @@ cdef class Token:
             yield from word.subtree
 
     @property
-    def left_edge(self):
+    def left_edge(self) -> int:
         """The leftmost token of this token's syntactic descendents.
 
         RETURNS (Token): The first token such that `self.is_ancestor(token)`.
@@ -606,7 +609,7 @@ cdef class Token:
         return self.doc[self.c.l_edge]
 
     @property
-    def right_edge(self):
+    def right_edge(self) -> int:
         """The rightmost token of this token's syntactic descendents.
 
         RETURNS (Token): The last token such that `self.is_ancestor(token)`.
@@ -741,7 +744,7 @@ cdef class Token:
 
     @classmethod
     def iob_strings(cls):
-        return ("", "I", "O", "B")
+        return IOB_STRINGS
 
     @property
     def ent_iob_(self):
@@ -818,12 +821,12 @@ cdef class Token:
         def __get__(self):
             return self.vocab.strings[self.norm]
 
-        def __set__(self, unicode norm_):
+        def __set__(self, str norm_):
             self.c.norm = self.vocab.strings.add(norm_)
 
     @property
     def shape_(self):
-        """RETURNS (str): Transform of the tokens's string, to show
+        """RETURNS (str): Transform of the token's string, to show
             orthographic features. For example, "Xxxx" or "dd".
         """
         return self.vocab.strings[self.c.lex.shape]
@@ -856,7 +859,7 @@ cdef class Token:
         def __get__(self):
             return self.vocab.strings[self.c.lemma]
 
-        def __set__(self, unicode lemma_):
+        def __set__(self, str lemma_):
             self.c.lemma = self.vocab.strings.add(lemma_)
 
     property pos_:
@@ -865,6 +868,8 @@ cdef class Token:
             return parts_of_speech.NAMES[self.c.pos]
 
         def __set__(self, pos_name):
+            if pos_name not in parts_of_speech.IDS:
+                raise ValueError(Errors.E1021.format(pp=pos_name))
             self.c.pos = parts_of_speech.IDS[pos_name]
 
     property tag_:
@@ -888,7 +893,7 @@ cdef class Token:
         def __get__(self):
             return self.vocab.strings[self.c.dep]
 
-        def __set__(self, unicode label):
+        def __set__(self, str label):
             self.c.dep = self.vocab.strings.add(label)
 
     @property

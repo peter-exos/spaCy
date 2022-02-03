@@ -1,11 +1,10 @@
-from __future__ import unicode_literals
-
 cimport numpy as np
 from libc.math cimport sqrt
 
 import numpy
 from thinc.api import get_array_module
 import warnings
+import copy
 
 from .doc cimport token_by_start, token_by_end, get_token_attr, _get_lca_matrix
 from ..structs cimport TokenC, LexemeC
@@ -87,10 +86,11 @@ cdef class Span:
         doc (Doc): The parent document.
         start (int): The index of the first token of the span.
         end (int): The index of the first token after the span.
-        label (uint64): A label to attach to the Span, e.g. for named entities.
-        kb_id (uint64): An identifier from a Knowledge Base to capture the meaning of a named entity.
+        label (int or str): A label to attach to the Span, e.g. for named entities.
         vector (ndarray[ndim=1, dtype='float32']): A meaning representation
             of the span.
+        vector_norm (float): The L2 norm of the span's vector representation.
+        kb_id (uint64): An identifier from a Knowledge Base to capture the meaning of a named entity.
 
         DOCS: https://spacy.io/api/span#init
         """
@@ -104,13 +104,18 @@ cdef class Span:
         if label not in doc.vocab.strings:
             raise ValueError(Errors.E084.format(label=label))
 
+        start_char = doc[start].idx if start < doc.length else len(doc.text)
+        if start == end:
+            end_char = start_char
+        else:
+            end_char = doc[end - 1].idx + len(doc[end - 1])
         self.c = SpanC(
             label=label,
             kb_id=kb_id,
             start=start,
             end=end,
-            start_char=doc[start].idx if start < doc.length else 0,
-            end_char=doc[end - 1].idx + len(doc[end - 1]) if end >= 1 else 0,
+            start_char=start_char,
+            end_char=end_char,
         )
         self._vector = vector
         self._vector_norm = vector_norm
@@ -212,10 +217,12 @@ cdef class Span:
         return Underscore(Underscore.span_extensions, self,
                           start=self.c.start_char, end=self.c.end_char)
 
-    def as_doc(self, *, bint copy_user_data=False):
+    def as_doc(self, *, bint copy_user_data=False, array_head=None, array=None):
         """Create a `Doc` object with a copy of the `Span`'s data.
 
         copy_user_data (bool): Whether or not to copy the original doc's user data.
+        array_head (tuple): `Doc` array attrs, can be passed in to speed up computation.
+        array (ndarray): `Doc` as array, can be passed in to speed up computation.
         RETURNS (Doc): The `Doc` copy of the span.
 
         DOCS: https://spacy.io/api/span#as_doc
@@ -223,11 +230,31 @@ cdef class Span:
         words = [t.text for t in self]
         spaces = [bool(t.whitespace_) for t in self]
         cdef Doc doc = Doc(self.doc.vocab, words=words, spaces=spaces)
-        array_head = self.doc._get_array_attrs()
-        array = self.doc.to_array(array_head)
+        if array_head is None:
+            array_head = self.doc._get_array_attrs()
+        if array is None:
+            array = self.doc.to_array(array_head)
         array = array[self.start : self.end]
         self._fix_dep_copy(array_head, array)
+        # Fix initial IOB so the entities are valid for doc.ents below.
+        if len(array) > 0 and ENT_IOB in array_head:
+            ent_iob_col = array_head.index(ENT_IOB)
+            if array[0][ent_iob_col] == 1:
+                array[0][ent_iob_col] = 3
         doc.from_array(array_head, array)
+        # Set partial entities at the beginning or end of the span to have
+        # missing entity annotation. Note: the initial partial entity could be
+        # detected from the IOB annotation but the final partial entity can't,
+        # so detect and remove both in the same way by checking self.ents.
+        span_ents = {(ent.start, ent.end) for ent in self.ents}
+        doc_ents = doc.ents
+        if len(doc_ents) > 0:
+            # Remove initial partial ent
+            if (doc_ents[0].start + self.start, doc_ents[0].end + self.start) not in span_ents:
+                doc.set_ents([], missing=[doc_ents[0]], default="unmodified")
+            # Remove final partial ent
+            if (doc_ents[-1].start + self.start, doc_ents[-1].end + self.start) not in span_ents:
+                doc.set_ents([], missing=[doc_ents[-1]], default="unmodified")
         doc.noun_chunks_iterator = self.doc.noun_chunks_iterator
         doc.user_hooks = self.doc.user_hooks
         doc.user_span_hooks = self.doc.user_span_hooks
@@ -241,7 +268,19 @@ cdef class Span:
                 if cat_start == self.start_char and cat_end == self.end_char:
                     doc.cats[cat_label] = value
         if copy_user_data:
-            doc.user_data = self.doc.user_data
+            user_data = {}
+            char_offset = self.start_char
+            for key, value in self.doc.user_data.items():
+                if isinstance(key, tuple) and len(key) == 4 and key[0] == "._.":
+                    data_type, name, start, end = key
+                    if start is not None or end is not None:
+                        start -= char_offset
+                        if end is not None:
+                            end -= char_offset
+                        user_data[(data_type, name, start, end)] = copy.copy(value)
+                else:
+                    user_data[key] = copy.copy(value)
+            doc.user_data = user_data
         return doc
 
     def _fix_dep_copy(self, attrs, array):
@@ -325,8 +364,10 @@ cdef class Span:
             return 0.0
         vector = self.vector
         xp = get_array_module(vector)
-        return xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm)
-
+        result = xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm)
+        # ensure we get a scalar back (numpy does this automatically but cupy doesn't)
+        return result.item()
+    
     cpdef np.ndarray to_array(self, object py_attr_ids):
         """Given a list of M attribute IDs, export the tokens to a numpy
         `ndarray` of shape `(N, M)`, where `N` is the length of the document.
@@ -357,9 +398,18 @@ cdef class Span:
 
     @property
     def sent(self):
-        """RETURNS (Span): The sentence span that the span is a part of."""
+        """Obtain the sentence that contains this span. If the given span
+        crosses sentence boundaries, return only the first sentence
+        to which it belongs.
+
+        RETURNS (Span): The sentence span that the span is a part of.
+        """
         if "sent" in self.doc.user_span_hooks:
             return self.doc.user_span_hooks["sent"](self)
+        elif "sents" in self.doc.user_hooks:
+            for sentence in self.doc.user_hooks["sents"](self.doc):
+                if sentence.start <= self.start < sentence.end:
+                    return sentence
         # Use `sent_start` token attribute to find sentence boundaries
         cdef int n = 0
         if self.doc.has_annotation("SENT_START"):
@@ -367,8 +417,8 @@ cdef class Span:
             start = self.start
             while self.doc.c[start].sent_start != 1 and start > 0:
                 start += -1
-            # Find end of the sentence
-            end = self.end
+            # Find end of the sentence - can be within the entity
+            end = self.start + 1
             while end < self.doc.length and self.doc.c[end].sent_start != 1:
                 end += 1
                 n += 1
@@ -379,9 +429,50 @@ cdef class Span:
             raise ValueError(Errors.E030)
 
     @property
+    def sents(self):
+        """Obtain the sentences that contain this span. If the given span
+        crosses sentence boundaries, return all sentences it is a part of.
+
+        RETURNS (Iterable[Span]): All sentences that the span is a part of.
+
+         DOCS: https://spacy.io/api/span#sents
+        """
+        cdef int start
+        cdef int i
+
+        if "sents" in self.doc.user_span_hooks:
+            yield from self.doc.user_span_hooks["sents"](self)
+        elif "sents" in self.doc.user_hooks:
+            for sentence in self.doc.user_hooks["sents"](self.doc):
+                if sentence.end > self.start:
+                    if sentence.start < self.end or sentence.start == self.start == self.end:
+                        yield sentence
+                    else:
+                        break
+        else:
+            if not self.doc.has_annotation("SENT_START"):
+                raise ValueError(Errors.E030)
+            # Use `sent_start` token attribute to find sentence boundaries
+            # Find start of the 1st sentence of the Span
+            start = self.start
+            while self.doc.c[start].sent_start != 1 and start > 0:
+                start -= 1
+
+            # Now, find all the sentences in the span
+            for i in range(start + 1, self.doc.length):
+                if self.doc.c[i].sent_start == 1:
+                    yield Span(self.doc, start, i)
+                    start = i
+                    if start >= self.end:
+                        break
+            if start < self.end:
+                yield Span(self.doc, start, self.end)
+
+
+    @property
     def ents(self):
-        """The named entities in the span. Returns a tuple of named entity
-        `Span` objects, if the entity recognizer has been applied.
+        """The named entities that fall completely within the span. Returns
+        a tuple of `Span` objects.
 
         RETURNS (tuple): Entities in the span, one `Span` per entity.
 
@@ -408,7 +499,7 @@ cdef class Span:
         """
         if "has_vector" in self.doc.user_span_hooks:
             return self.doc.user_span_hooks["has_vector"](self)
-        elif self.vocab.vectors.data.size > 0:
+        elif self.vocab.vectors.size > 0:
             return any(token.has_vector for token in self)
         elif self.doc.tensor.size > 0:
             return True
@@ -428,7 +519,11 @@ cdef class Span:
         if "vector" in self.doc.user_span_hooks:
             return self.doc.user_span_hooks["vector"](self)
         if self._vector is None:
-            self._vector = sum(t.vector for t in self) / len(self)
+            if not len(self):
+                xp = get_array_module(self.vocab.vectors.data)
+                self._vector = xp.zeros((self.vocab.vectors_length,), dtype="f")
+            else:
+                self._vector = sum(t.vector for t in self) / len(self)
         return self._vector
 
     @property
@@ -441,10 +536,10 @@ cdef class Span:
         """
         if "vector_norm" in self.doc.user_span_hooks:
             return self.doc.user_span_hooks["vector"](self)
-        vector = self.vector
-        xp = get_array_module(vector)
         if self._vector_norm is None:
+            vector = self.vector
             total = (vector*vector).sum()
+            xp = get_array_module(vector)
             self._vector_norm = xp.sqrt(total) if total != 0. else 0.
         return self._vector_norm
 
@@ -704,7 +799,7 @@ cdef class Span:
         def __get__(self):
             return self.root.ent_id_
 
-        def __set__(self, hash_t key):
+        def __set__(self, str key):
             raise NotImplementedError(Errors.E200.format(attr="ent_id_"))
 
     @property
@@ -718,31 +813,23 @@ cdef class Span:
     @property
     def lemma_(self):
         """RETURNS (str): The span's lemma."""
-        return " ".join([t.lemma_ for t in self]).strip()
+        return "".join([t.lemma_ + t.whitespace_ for t in self]).strip()
 
     property label_:
         """RETURNS (str): The span's label."""
         def __get__(self):
             return self.doc.vocab.strings[self.label]
 
-        def __set__(self, unicode label_):
-            if not label_:
-                label_ = ''
-            raise NotImplementedError(Errors.E129.format(start=self.start, end=self.end, label=label_))
+        def __set__(self, str label_):
+            self.label = self.doc.vocab.strings.add(label_)
 
     property kb_id_:
         """RETURNS (str): The named entity's KB ID."""
         def __get__(self):
             return self.doc.vocab.strings[self.kb_id]
 
-        def __set__(self, unicode kb_id_):
-            if not kb_id_:
-                kb_id_ = ''
-            current_label = self.label_
-            if not current_label:
-                current_label = ''
-            raise NotImplementedError(Errors.E131.format(start=self.start, end=self.end,
-                                                         label=current_label, kb_id=kb_id_))
+        def __set__(self, str kb_id_):
+            self.kb_id = self.doc.vocab.strings.add(kb_id_)
 
 
 cdef int _count_words_to_root(const TokenC* token, int sent_length) except -1:

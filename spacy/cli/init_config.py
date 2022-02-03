@@ -10,7 +10,8 @@ from jinja2 import Template
 from .. import util
 from ..language import DEFAULT_CONFIG_PRETRAIN_PATH
 from ..schemas import RecommendationSchema
-from ._util import init_cli, Arg, Opt, show_validation_error, COMMAND, string_to_list
+from ._util import init_cli, Arg, Opt, show_validation_error, COMMAND
+from ._util import string_to_list, import_code
 
 
 ROOT = Path(__file__).parent / "templates"
@@ -26,9 +27,9 @@ class Optimizations(str, Enum):
 @init_cli.command("config")
 def init_config_cli(
     # fmt: off
-    output_file: Path = Arg(..., help="File to save config.cfg to or - for stdout (will only output config and no additional logging info)", allow_dash=True),
-    lang: Optional[str] = Opt("en", "--lang", "-l", help="Two-letter code of the language to use"),
-    pipeline: Optional[str] = Opt("tagger,parser,ner", "--pipeline", "-p", help="Comma-separated names of trainable pipeline components to include (without 'tok2vec' or 'transformer')"),
+    output_file: Path = Arg(..., help="File to save the config to or - for stdout (will only output config and no additional logging info)", allow_dash=True),
+    lang: str = Opt("en", "--lang", "-l", help="Two-letter code of the language to use"),
+    pipeline: str = Opt("tagger,parser,ner", "--pipeline", "-p", help="Comma-separated names of trainable pipeline components to include (without 'tok2vec' or 'transformer')"),
     optimize: Optimizations = Opt(Optimizations.efficiency.value, "--optimize", "-o", help="Whether to optimize for efficiency (faster inference, smaller model, lower memory consumption) or higher accuracy (potentially larger and slower model). This will impact the choice of architecture, pretrained weights and related hyperparameters."),
     gpu: bool = Opt(False, "--gpu", "-G", help="Whether the model can run on GPU. This will impact the choice of architecture, pretrained weights and related hyperparameters."),
     pretraining: bool = Opt(False, "--pretraining", "-pt", help="Include config for pretraining (with 'spacy pretrain')"),
@@ -36,15 +37,13 @@ def init_config_cli(
     # fmt: on
 ):
     """
-    Generate a starter config.cfg for training. Based on your requirements
+    Generate a starter config file for training. Based on your requirements
     specified via the CLI arguments, this command generates a config with the
     optimal settings for your use case. This includes the choice of architecture,
     pretrained weights and related hyperparameters.
 
     DOCS: https://spacy.io/api/cli#init-config
     """
-    if isinstance(optimize, Optimizations):  # instance of enum from the CLI
-        optimize = optimize.value
     pipeline = string_to_list(pipeline)
     is_stdout = str(output_file) == "-"
     if not is_stdout and output_file.exists() and not force_overwrite:
@@ -56,7 +55,7 @@ def init_config_cli(
     config = init_config(
         lang=lang,
         pipeline=pipeline,
-        optimize=optimize,
+        optimize=optimize.value,
         gpu=gpu,
         pretraining=pretraining,
         silent=is_stdout,
@@ -67,14 +66,15 @@ def init_config_cli(
 @init_cli.command("fill-config")
 def init_fill_config_cli(
     # fmt: off
-    base_path: Path = Arg(..., help="Base config to fill", exists=True, dir_okay=False),
-    output_file: Path = Arg("-", help="File to save config.cfg to (or - for stdout)", allow_dash=True),
+    base_path: Path = Arg(..., help="Path to base config to fill", exists=True, dir_okay=False),
+    output_file: Path = Arg("-", help="Path to output .cfg file (or - for stdout)", allow_dash=True),
     pretraining: bool = Opt(False, "--pretraining", "-pt", help="Include config for pretraining (with 'spacy pretrain')"),
-    diff: bool = Opt(False, "--diff", "-D", help="Print a visual diff highlighting the changes")
+    diff: bool = Opt(False, "--diff", "-D", help="Print a visual diff highlighting the changes"),
+    code_path: Optional[Path] = Opt(None, "--code-path", "--code", "-c", help="Path to Python file with additional code (registered functions) to be imported"),
     # fmt: on
 ):
     """
-    Fill partial config.cfg with default values. Will add all missing settings
+    Fill partial config file with default values. Will add all missing settings
     from the default config and will create all objects, check the registered
     functions for their default values and update the base config. This command
     can be used with a config generated via the training quickstart widget:
@@ -82,6 +82,7 @@ def init_fill_config_cli(
 
     DOCS: https://spacy.io/api/cli#init-fill-config
     """
+    import_code(code_path)
     fill_config(output_file, base_path, pretraining=pretraining, diff=diff)
 
 
@@ -103,6 +104,10 @@ def fill_config(
     # config result is a valid config
     nlp = util.load_model_from_config(nlp.config)
     filled = nlp.config
+    # If we have sourced components in the base config, those will have been
+    # replaced with their actual config after loading, so we have to re-add them
+    sourced = util.get_sourced_components(config)
+    filled["components"].update(sourced)
     if pretraining:
         validate_config_for_pretrain(filled, msg)
         pretrain_config = util.load_config(DEFAULT_CONFIG_PRETRAIN_PATH)
@@ -168,8 +173,8 @@ def init_config(
         "Pipeline": ", ".join(pipeline),
         "Optimize for": optimize,
         "Hardware": variables["hardware"].upper(),
-        "Transformer": template_vars.transformer.get("name")
-        if template_vars.use_transformer
+        "Transformer": template_vars.transformer.get("name")  # type: ignore[attr-defined]
+        if template_vars.use_transformer  # type: ignore[attr-defined]
         else None,
     }
     msg.info("Generated config template specific for your use case")

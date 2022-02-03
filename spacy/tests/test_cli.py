@@ -1,20 +1,105 @@
-import pytest
-from click import NoSuchOption
-from spacy.training import docs_to_json, offsets_to_biluo_tags
-from spacy.training.converters import iob_to_docs, conll_ner_to_docs, conllu_to_docs
-from spacy.schemas import ProjectConfigSchema, RecommendationSchema, validate
-from spacy.lang.nl import Dutch
-from spacy.util import ENV_VARS
-from spacy.cli import info
-from spacy.cli.init_config import init_config, RECOMMENDATIONS
-from spacy.cli._util import validate_project_commands, parse_config_overrides
-from spacy.cli._util import load_project_config, substitute_project_variables
-from spacy.cli._util import string_to_list
-from thinc.api import ConfigValidationError, Config
-import srsly
 import os
 
+import pytest
+import srsly
+from click import NoSuchOption
+from packaging.specifiers import SpecifierSet
+from thinc.api import Config, ConfigValidationError
+
+from spacy import about
+from spacy.cli import info
+from spacy.cli._util import is_subpath_of, load_project_config
+from spacy.cli._util import parse_config_overrides, string_to_list
+from spacy.cli._util import substitute_project_variables
+from spacy.cli._util import validate_project_commands
+from spacy.cli.debug_data import _get_labels_from_model
+from spacy.cli.debug_data import _get_labels_from_spancat
+from spacy.cli.download import get_compatibility, get_version
+from spacy.cli.init_config import RECOMMENDATIONS, init_config, fill_config
+from spacy.cli.package import get_third_party_dependencies
+from spacy.cli.validate import get_model_pkgs
+from spacy.lang.en import English
+from spacy.lang.nl import Dutch
+from spacy.language import Language
+from spacy.schemas import ProjectConfigSchema, RecommendationSchema, validate
+from spacy.training import Example, docs_to_json, offsets_to_biluo_tags
+from spacy.training.converters import conll_ner_to_docs, conllu_to_docs
+from spacy.training.converters import iob_to_docs
+from spacy.util import ENV_VARS, get_minor_version, load_model_from_config, load_config
+
+from ..cli.init_pipeline import _init_labels
 from .util import make_tempdir
+
+
+@pytest.mark.issue(4665)
+def test_issue4665():
+    """
+    conllu_to_docs should not raise an exception if the HEAD column contains an
+    underscore
+    """
+    input_data = """
+1	[	_	PUNCT	-LRB-	_	_	punct	_	_
+2	This	_	DET	DT	_	_	det	_	_
+3	killing	_	NOUN	NN	_	_	nsubj	_	_
+4	of	_	ADP	IN	_	_	case	_	_
+5	a	_	DET	DT	_	_	det	_	_
+6	respected	_	ADJ	JJ	_	_	amod	_	_
+7	cleric	_	NOUN	NN	_	_	nmod	_	_
+8	will	_	AUX	MD	_	_	aux	_	_
+9	be	_	AUX	VB	_	_	aux	_	_
+10	causing	_	VERB	VBG	_	_	root	_	_
+11	us	_	PRON	PRP	_	_	iobj	_	_
+12	trouble	_	NOUN	NN	_	_	dobj	_	_
+13	for	_	ADP	IN	_	_	case	_	_
+14	years	_	NOUN	NNS	_	_	nmod	_	_
+15	to	_	PART	TO	_	_	mark	_	_
+16	come	_	VERB	VB	_	_	acl	_	_
+17	.	_	PUNCT	.	_	_	punct	_	_
+18	]	_	PUNCT	-RRB-	_	_	punct	_	_
+"""
+    conllu_to_docs(input_data)
+
+
+@pytest.mark.issue(4924)
+def test_issue4924():
+    nlp = Language()
+    example = Example.from_dict(nlp.make_doc(""), {})
+    nlp.evaluate([example])
+
+
+@pytest.mark.issue(7055)
+def test_issue7055():
+    """Test that fill-config doesn't turn sourced components into factories."""
+    source_cfg = {
+        "nlp": {"lang": "en", "pipeline": ["tok2vec", "tagger"]},
+        "components": {
+            "tok2vec": {"factory": "tok2vec"},
+            "tagger": {"factory": "tagger"},
+        },
+    }
+    source_nlp = English.from_config(source_cfg)
+    with make_tempdir() as dir_path:
+        # We need to create a loadable source pipeline
+        source_path = dir_path / "test_model"
+        source_nlp.to_disk(source_path)
+        base_cfg = {
+            "nlp": {"lang": "en", "pipeline": ["tok2vec", "tagger", "ner"]},
+            "components": {
+                "tok2vec": {"source": str(source_path)},
+                "tagger": {"source": str(source_path)},
+                "ner": {"factory": "ner"},
+            },
+        }
+        base_cfg = Config(base_cfg)
+        base_path = dir_path / "base.cfg"
+        base_cfg.to_disk(base_path)
+        output_path = dir_path / "config.cfg"
+        fill_config(output_path, base_path, silent=True)
+        filled_cfg = load_config(output_path)
+    assert filled_cfg["components"]["tok2vec"]["source"] == str(source_path)
+    assert filled_cfg["components"]["tagger"]["source"] == str(source_path)
+    assert filled_cfg["components"]["ner"]["factory"] == "ner"
+    assert "model" in filled_cfg["components"]["ner"]
 
 
 def test_cli_info():
@@ -307,8 +392,12 @@ def test_project_config_validation2(config, n_errors):
     assert len(errors) == n_errors
 
 
-def test_project_config_interpolation():
-    variables = {"a": 10, "b": {"c": "foo", "d": True}}
+@pytest.mark.parametrize(
+    "int_value",
+    [10, pytest.param("10", marks=pytest.mark.xfail)],
+)
+def test_project_config_interpolation(int_value):
+    variables = {"a": int_value, "b": {"c": "foo", "d": True}}
     commands = [
         {"name": "x", "script": ["hello ${vars.a} ${vars.b.c}"]},
         {"name": "y", "script": ["${vars.b.c} ${vars.b.d}"]},
@@ -317,12 +406,50 @@ def test_project_config_interpolation():
     with make_tempdir() as d:
         srsly.write_yaml(d / "project.yml", project)
         cfg = load_project_config(d)
+    assert type(cfg) == dict
+    assert type(cfg["commands"]) == list
     assert cfg["commands"][0]["script"][0] == "hello 10 foo"
     assert cfg["commands"][1]["script"][0] == "foo true"
     commands = [{"name": "x", "script": ["hello ${vars.a} ${vars.b.e}"]}]
     project = {"commands": commands, "vars": variables}
     with pytest.raises(ConfigValidationError):
         substitute_project_variables(project)
+
+
+@pytest.mark.parametrize(
+    "greeting",
+    [342, "everyone", "tout le monde", pytest.param("42", marks=pytest.mark.xfail)],
+)
+def test_project_config_interpolation_override(greeting):
+    variables = {"a": "world"}
+    commands = [
+        {"name": "x", "script": ["hello ${vars.a}"]},
+    ]
+    overrides = {"vars.a": greeting}
+    project = {"commands": commands, "vars": variables}
+    with make_tempdir() as d:
+        srsly.write_yaml(d / "project.yml", project)
+        cfg = load_project_config(d, overrides=overrides)
+    assert type(cfg) == dict
+    assert type(cfg["commands"]) == list
+    assert cfg["commands"][0]["script"][0] == f"hello {greeting}"
+
+
+def test_project_config_interpolation_env():
+    variables = {"a": 10}
+    env_var = "SPACY_TEST_FOO"
+    env_vars = {"foo": env_var}
+    commands = [{"name": "x", "script": ["hello ${vars.a} ${env.foo}"]}]
+    project = {"commands": commands, "vars": variables, "env": env_vars}
+    with make_tempdir() as d:
+        srsly.write_yaml(d / "project.yml", project)
+        cfg = load_project_config(d)
+    assert cfg["commands"][0]["script"][0] == "hello 10 "
+    os.environ[env_var] = "123"
+    with make_tempdir() as d:
+        srsly.write_yaml(d / "project.yml", project)
+        cfg = load_project_config(d)
+    assert cfg["commands"][0]["script"][0] == "hello 10 123"
 
 
 @pytest.mark.parametrize(
@@ -380,10 +507,20 @@ def test_parse_cli_overrides():
     "pipeline", [["tagger", "parser", "ner"], [], ["ner", "textcat", "sentencizer"]]
 )
 @pytest.mark.parametrize("optimize", ["efficiency", "accuracy"])
-def test_init_config(lang, pipeline, optimize):
+@pytest.mark.parametrize("pretraining", [True, False])
+def test_init_config(lang, pipeline, optimize, pretraining):
     # TODO: add more tests and also check for GPU with transformers
-    config = init_config(lang=lang, pipeline=pipeline, optimize=optimize, gpu=False)
+    config = init_config(
+        lang=lang,
+        pipeline=pipeline,
+        optimize=optimize,
+        pretraining=pretraining,
+        gpu=False,
+    )
     assert isinstance(config, Config)
+    if pretraining:
+        config["paths"]["raw_text"] = "my_data.jsonl"
+    load_model_from_config(config, auto_fill=True)
 
 
 def test_model_recommendations():
@@ -430,3 +567,128 @@ def test_string_to_list(value):
 def test_string_to_list_intify(value):
     assert string_to_list(value, intify=False) == ["1", "2", "3"]
     assert string_to_list(value, intify=True) == [1, 2, 3]
+
+
+def test_download_compatibility():
+    spec = SpecifierSet("==" + about.__version__)
+    spec.prereleases = False
+    if about.__version__ in spec:
+        model_name = "en_core_web_sm"
+        compatibility = get_compatibility()
+        version = get_version(model_name, compatibility)
+        assert get_minor_version(about.__version__) == get_minor_version(version)
+
+
+def test_validate_compatibility_table():
+    spec = SpecifierSet("==" + about.__version__)
+    spec.prereleases = False
+    if about.__version__ in spec:
+        model_pkgs, compat = get_model_pkgs()
+        spacy_version = get_minor_version(about.__version__)
+        current_compat = compat.get(spacy_version, {})
+        assert len(current_compat) > 0
+        assert "en_core_web_sm" in current_compat
+
+
+@pytest.mark.parametrize("component_name", ["ner", "textcat", "spancat", "tagger"])
+def test_init_labels(component_name):
+    nlp = Dutch()
+    component = nlp.add_pipe(component_name)
+    for label in ["T1", "T2", "T3", "T4"]:
+        component.add_label(label)
+    assert len(nlp.get_pipe(component_name).labels) == 4
+
+    with make_tempdir() as tmp_dir:
+        _init_labels(nlp, tmp_dir)
+
+        config = init_config(
+            lang="nl",
+            pipeline=[component_name],
+            optimize="efficiency",
+            gpu=False,
+        )
+        config["initialize"]["components"][component_name] = {
+            "labels": {
+                "@readers": "spacy.read_labels.v1",
+                "path": f"{tmp_dir}/{component_name}.json",
+            }
+        }
+
+        nlp2 = load_model_from_config(config, auto_fill=True)
+        assert len(nlp2.get_pipe(component_name).labels) == 0
+        nlp2.initialize()
+        assert len(nlp2.get_pipe(component_name).labels) == 4
+
+
+def test_get_third_party_dependencies():
+    # We can't easily test the detection of third-party packages here, but we
+    # can at least make sure that the function and its importlib magic runs.
+    nlp = Dutch()
+    # Test with component factory based on Cython module
+    nlp.add_pipe("tagger")
+    assert get_third_party_dependencies(nlp.config) == []
+
+    # Test with legacy function
+    nlp = Dutch()
+    nlp.add_pipe(
+        "textcat",
+        config={
+            "model": {
+                # Do not update from legacy architecture spacy.TextCatBOW.v1
+                "@architectures": "spacy.TextCatBOW.v1",
+                "exclusive_classes": True,
+                "ngram_size": 1,
+                "no_output_layer": False,
+            }
+        },
+    )
+    assert get_third_party_dependencies(nlp.config) == []
+
+    # Test with lang-specific factory
+    @Dutch.factory("third_party_test")
+    def test_factory(nlp, name):
+        return lambda x: x
+
+    nlp.add_pipe("third_party_test")
+    # Before #9674 this would throw an exception
+    get_third_party_dependencies(nlp.config)
+
+
+@pytest.mark.parametrize(
+    "parent,child,expected",
+    [
+        ("/tmp", "/tmp", True),
+        ("/tmp", "/", False),
+        ("/tmp", "/tmp/subdir", True),
+        ("/tmp", "/tmpdir", False),
+        ("/tmp", "/tmp/subdir/..", True),
+        ("/tmp", "/tmp/..", False),
+    ],
+)
+def test_is_subpath_of(parent, child, expected):
+    assert is_subpath_of(parent, child) == expected
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "factory_name,pipe_name",
+    [
+        ("ner", "ner"),
+        ("ner", "my_ner"),
+        ("spancat", "spancat"),
+        ("spancat", "my_spancat"),
+    ],
+)
+def test_get_labels_from_model(factory_name, pipe_name):
+    labels = ("A", "B")
+
+    nlp = English()
+    pipe = nlp.add_pipe(factory_name, name=pipe_name)
+    for label in labels:
+        pipe.add_label(label)
+    nlp.initialize()
+    assert nlp.get_pipe(pipe_name).labels == labels
+    if factory_name == "spancat":
+        assert _get_labels_from_spancat(nlp)[pipe.key] == set(labels)
+    else:
+        assert _get_labels_from_model(nlp, factory_name) == set(labels)

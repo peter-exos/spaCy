@@ -4,7 +4,6 @@ import tqdm
 import sys
 
 from ..util import registry
-from .. import util
 from ..errors import Errors
 
 if TYPE_CHECKING:
@@ -29,7 +28,7 @@ def console_logger(progress_bar: bool = False):
     def setup_printer(
         nlp: "Language", stdout: IO = sys.stdout, stderr: IO = sys.stderr
     ) -> Tuple[Callable[[Optional[Dict[str, Any]]], None], Callable[[], None]]:
-        write = lambda text: stdout.write(f"{text}\n")
+        write = lambda text: print(text, file=stdout, flush=True)
         msg = Printer(no_print=True)
         # ensure that only trainable components are logged
         logged_pipes = [
@@ -99,41 +98,3 @@ def console_logger(progress_bar: bool = False):
         return log_step, finalize
 
     return setup_printer
-
-
-@registry.loggers("spacy.WandbLogger.v1")
-def wandb_logger(project_name: str, remove_config_values: List[str] = []):
-    import wandb
-
-    console = console_logger(progress_bar=False)
-
-    def setup_logger(
-        nlp: "Language", stdout: IO = sys.stdout, stderr: IO = sys.stderr
-    ) -> Tuple[Callable[[Dict[str, Any]], None], Callable[[], None]]:
-        config = nlp.config.interpolate()
-        config_dot = util.dict_to_dot(config)
-        for field in remove_config_values:
-            del config_dot[field]
-        config = util.dot_to_dict(config_dot)
-        wandb.init(project=project_name, config=config, reinit=True)
-        console_log_step, console_finalize = console(nlp, stdout, stderr)
-
-        def log_step(info: Optional[Dict[str, Any]]):
-            console_log_step(info)
-            if info is not None:
-                score = info["score"]
-                other_scores = info["other_scores"]
-                losses = info["losses"]
-                wandb.log({"score": score})
-                if losses:
-                    wandb.log({f"loss_{k}": v for k, v in losses.items()})
-                if isinstance(other_scores, dict):
-                    wandb.log(other_scores)
-
-        def finalize() -> None:
-            console_finalize()
-            wandb.join()
-
-        return log_step, finalize
-
-    return setup_logger

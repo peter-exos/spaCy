@@ -130,8 +130,10 @@ cdef class Lexeme:
             return 0.0
         vector = self.vector
         xp = get_array_module(vector)
-        return (xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm))
-
+        result = xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm)
+        # ensure we get a scalar back (numpy does this automatically but cupy doesn't)
+        return result.item()
+    
     @property
     def has_vector(self):
         """RETURNS (bool): Whether a word vector is associated with the object.
@@ -163,7 +165,7 @@ cdef class Lexeme:
             self.vocab.set_vector(self.c.orth, vector)
 
     property rank:
-        """RETURNS (str): Sequential ID of the lexemes's lexical type, used
+        """RETURNS (str): Sequential ID of the lexeme's lexical type, used
             to index into tables, e.g. for word vectors."""
         def __get__(self):
             return self.c.id
@@ -205,7 +207,7 @@ cdef class Lexeme:
             self.c.lower = x
 
     property norm:
-        """RETURNS (uint64): The lexemes's norm, i.e. a normalised form of the
+        """RETURNS (uint64): The lexeme's norm, i.e. a normalised form of the
             lexeme text.
         """
         def __get__(self):
@@ -284,17 +286,17 @@ cdef class Lexeme:
         def __get__(self):
             return self.vocab.strings[self.c.lower]
 
-        def __set__(self, unicode x):
+        def __set__(self, str x):
             self.c.lower = self.vocab.strings.add(x)
 
     property norm_:
-        """RETURNS (str): The lexemes's norm, i.e. a normalised form of the
+        """RETURNS (str): The lexeme's norm, i.e. a normalised form of the
             lexeme text.
         """
         def __get__(self):
             return self.vocab.strings[self.c.norm]
 
-        def __set__(self, unicode x):
+        def __set__(self, str x):
             self.norm = self.vocab.strings.add(x)
 
     property shape_:
@@ -304,7 +306,7 @@ cdef class Lexeme:
         def __get__(self):
             return self.vocab.strings[self.c.shape]
 
-        def __set__(self, unicode x):
+        def __set__(self, str x):
             self.c.shape = self.vocab.strings.add(x)
 
     property prefix_:
@@ -314,7 +316,7 @@ cdef class Lexeme:
         def __get__(self):
             return self.vocab.strings[self.c.prefix]
 
-        def __set__(self, unicode x):
+        def __set__(self, str x):
             self.c.prefix = self.vocab.strings.add(x)
 
     property suffix_:
@@ -324,7 +326,7 @@ cdef class Lexeme:
         def __get__(self):
             return self.vocab.strings[self.c.suffix]
 
-        def __set__(self, unicode x):
+        def __set__(self, str x):
             self.c.suffix = self.vocab.strings.add(x)
 
     property lang_:
@@ -332,7 +334,7 @@ cdef class Lexeme:
         def __get__(self):
             return self.vocab.strings[self.c.lang]
 
-        def __set__(self, unicode x):
+        def __set__(self, str x):
             self.c.lang = self.vocab.strings.add(x)
 
     property flags:
@@ -451,7 +453,7 @@ cdef class Lexeme:
             Lexeme.c_set_flag(self.c, IS_QUOTE, x)
 
     property is_left_punct:
-        """RETURNS (bool): Whether the lexeme is left punctuation, e.g. )."""
+        """RETURNS (bool): Whether the lexeme is left punctuation, e.g. (."""
         def __get__(self):
             return Lexeme.c_check_flag(self.c, IS_LEFT_PUNCT)
 

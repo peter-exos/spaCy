@@ -247,6 +247,10 @@ config can be used to configure the split mode to `A`, `B` or `C`.
 split_mode = "A"
 ```
 
+Extra information, such as reading, inflection form, and the SudachiPy
+normalized form, is available in `Token.morph`. For `B` or `C` split modes,
+subtokens are stored in `Doc.user_data["sub_tokens"]`.
+
 <Infobox variant="warning">
 
 If you run into errors related to `sudachipy`, which is currently under active
@@ -269,7 +273,7 @@ best-matching package compatible with your spaCy installation.
 >
 > ```diff
 > - python -m spacy download en
-> + python -m spacy dowmload en_core_web_sm
+> + python -m spacy download en_core_web_sm
 > ```
 >
 > ```diff
@@ -297,6 +301,17 @@ $ python -m spacy download en_core_web_sm
 import spacy
 nlp = spacy.load("en_core_web_sm")
 doc = nlp("This is a sentence.")
+```
+
+If you're in a **Jupyter notebook** or similar environment, you can use the `!`
+prefix to
+[execute commands](https://ipython.org/ipython-doc/3/interactive/tutorial.html#system-shell-commands).
+Make sure to **restart your kernel** or runtime after installation (just like
+you would when installing other Python packages) to make sure that the installed
+pipeline package can be found.
+
+```cli
+!python -m spacy download en_core_web_sm
 ```
 
 ### Installation via pip {#download-pip}
@@ -354,6 +369,27 @@ pipeline data.
 You can place the **pipeline package directory** anywhere on your local file
 system.
 
+### Installation from Python {#download-python}
+
+Since the [`spacy download`](/api/cli#download) command installs the pipeline as
+a **Python package**, we always recommend running it from the command line, just
+like you install other Python packages with `pip install`. However, if you need
+to, or if you want to integrate the download process into another CLI command,
+you can also import and call the `download` function used by the CLI via Python.
+
+<Infobox variant="warning">
+
+Keep in mind that the `download` command installs a Python package into your
+environment. In order for it to be found after installation, you will need to
+**restart or reload** your Python process so that new packages are recognized.
+
+</Infobox>
+
+```python
+import spacy
+spacy.cli.download("en_core_web_sm")
+```
+
 ### Using trained pipelines with spaCy {#usage}
 
 To load a pipeline package, use [`spacy.load`](/api/top-level#spacy.load) with
@@ -367,7 +403,7 @@ the package name or a path to the data directory:
 >
 > ```diff
 > - python -m spacy download en
-> + python -m spacy dowmload en_core_web_sm
+> + python -m spacy download en_core_web_sm
 > ```
 
 ```python
@@ -382,7 +418,7 @@ doc = nlp("This is a sentence.")
 
 You can use the [`info`](/api/cli#info) command or
 [`spacy.info()`](/api/top-level#spacy.info) method to print a pipeline
-packages's meta data before loading it. Each `Language` object with a loaded
+package's meta data before loading it. Each `Language` object with a loaded
 pipeline also exposes the pipeline's meta data as the attribute `meta`. For
 example, `nlp.meta['version']` will return the package version.
 
@@ -476,6 +512,5 @@ logic around spaCy's loader, you can use
 [pytest](http://pytest.readthedocs.io/en/latest/)'s
 [`importorskip()`](https://docs.pytest.org/en/latest/builtin.html#_pytest.outcomes.importorskip)
 method to only run a test if a specific pipeline package or version is
-installed. Each pipeline package package exposes a `__version__` attribute which
-you can also use to perform your own version compatibility checks before loading
-it.
+installed. Each pipeline package exposes a `__version__` attribute which you can
+also use to perform your own version compatibility checks before loading it.

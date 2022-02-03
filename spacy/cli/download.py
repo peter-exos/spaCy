@@ -6,7 +6,7 @@ import typer
 
 from ._util import app, Arg, Opt, WHEEL_SUFFIX, SDIST_SUFFIX
 from .. import about
-from ..util import is_package, get_base_version, run_command
+from ..util import is_package, get_minor_version, run_command
 from ..errors import OLD_MODEL_SHORTCUTS
 
 
@@ -60,7 +60,7 @@ def download(model: str, direct: bool = False, sdist: bool = False, *pip_args) -
         model_name = model
         if model in OLD_MODEL_SHORTCUTS:
             msg.warn(
-                f"As of spaCy v3.0, shortcuts like '{model}' are deprecated. Please"
+                f"As of spaCy v3.0, shortcuts like '{model}' are deprecated. Please "
                 f"use the full pipeline package name '{OLD_MODEL_SHORTCUTS[model]}' instead."
             )
             model_name = OLD_MODEL_SHORTCUTS[model]
@@ -74,7 +74,7 @@ def download(model: str, direct: bool = False, sdist: bool = False, *pip_args) -
 
 
 def get_compatibility() -> dict:
-    version = get_base_version(about.__version__)
+    version = get_minor_version(about.__version__)
     r = requests.get(about.__compatibility__)
     if r.status_code != 200:
         msg.fail(
